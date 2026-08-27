@@ -53,3 +53,98 @@ def test_unknown_session_raises_not_found(store):
     with pytest.raises(NotFoundError):
         store.list_events("ses_missing")
 
+
+
+def test_workspace_creation_and_session_scoping(tmp_path):
+    from zagent.storage.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "data"))
+    try:
+        workspaces = store.list_workspaces()
+        assert len(workspaces) == 1  # default workspace auto-created
+        default_id = workspaces[0]["workspace_id"]
+
+        project = store.create_workspace("项目 A", "/tmp/project-a")
+        assert project["name"] == "项目 A"
+        assert project["path"] == "/tmp/project-a"
+        assert project["session_count"] == 0
+
+        session = store.create_session("项目会话", project["workspace_id"])
+        assert session["workspace_id"] == project["workspace_id"]
+        store.create_session("默认会话")
+
+        assert len(store.list_sessions(project["workspace_id"])) == 1
+        assert [s["title"] for s in store.list_sessions(default_id)] == ["默认会话"]
+        assert len(store.list_sessions()) == 2
+
+        listed = store.list_workspaces()
+        by_name = {item["name"]: item for item in listed}
+        assert by_name["项目 A"]["session_count"] == 1
+    finally:
+        store.close()
+
+
+def test_v1_database_migrates_to_workspace_schema(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "data" / "state.db"
+    db_path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("""CREATE TABLE sessions (session_id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    conn.execute("INSERT INTO sessions VALUES('ses_old','旧会话','t','t')")
+    conn.commit()
+    conn.close()
+
+    from zagent.storage.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "data"))
+    try:
+        assert store.get_session("ses_old")["session_id"] == "ses_old"
+        assert len(store.list_workspaces()) == 1
+        assert store.list_sessions()[0]["title"] == "旧会话"
+    finally:
+        store.close()
+
+
+def test_workspace_path_update(tmp_path):
+    from zagent.storage.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "data"))
+    try:
+        workspace = store.create_workspace("项目", "")
+        assert workspace["path"] == ""
+        updated = store.update_workspace(workspace["workspace_id"], path="/tmp/project-a")
+        assert updated["path"] == "/tmp/project-a"
+        renamed = store.update_workspace(workspace["workspace_id"], name="项目 A")
+        assert renamed["name"] == "项目 A"
+        assert renamed["path"] == "/tmp/project-a"
+    finally:
+        store.close()
+
+
+def test_archive_failure_leaves_no_orphan_event(tmp_path):
+    import sqlite3
+
+    from zagent.storage.sqlite_store import SqliteStore
+
+    store = SqliteStore(str(tmp_path / "data"))
+    try:
+        session = store.create_session("原子性")
+        session_id = session["session_id"]
+        store.append_event(session_id, "message", "user", "内容")
+        store._db.execute("DROP TABLE archives")  # force the second write to fail
+        with pytest.raises(sqlite3.OperationalError):
+            store.create_archive(session_id, 1, 1, "收尾", {"stage": "done"})
+        events = store.list_events(session_id)
+        assert all(event.kind != "archive" for event in events)  # no orphan summary event
+    finally:
+        store.close()
+
+
+def test_search_ranks_exact_phrase_first(store, session_id):
+    store.append_event(session_id, "message", "user", "数据库迁移计划已经完成")
+    store.append_event(session_id, "message", "user", "今天讨论数据库和缓存")
+    results = store.search_events(session_id, "数据库迁移")
+    assert results[0]["event"]["payload"] == "数据库迁移计划已经完成"
+    assert results[0]["score"] < results[1]["score"]

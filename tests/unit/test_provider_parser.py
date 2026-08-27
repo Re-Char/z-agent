@@ -31,3 +31,16 @@ def test_invalid_tool_json_is_rejected():
 def test_missing_choices_is_rejected():
     with pytest.raises(ModelProtocolError):
         parse_openai_compatible_response({})
+
+
+def test_parse_reasoning_content():
+    response = parse_openai_compatible_response({"choices": [{"message": {
+        "content": "结果",
+        "reasoning_content": "先检索再回答",
+    }}]})
+    assert response.reasoning_content == "先检索再回答"
+
+
+def test_reasoning_content_missing_is_none():
+    response = parse_openai_compatible_response({"choices": [{"message": {"content": "结果"}}]})
+    assert response.reasoning_content is None

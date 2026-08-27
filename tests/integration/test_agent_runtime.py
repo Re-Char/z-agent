@@ -43,3 +43,49 @@ def test_agent_stops_at_tool_round_limit(store, session_id, context):
     import pytest
     with pytest.raises(AgentLimitError):
         runtime.send(session_id, "循环")
+
+
+def test_agent_preserves_reasoning_content_across_tool_round(store, session_id, context):
+    reasoning = "先确认状态，再汇总"
+    provider = SequenceProvider([
+        ModelResponse(
+            content="",
+            tool_calls=[ToolCall("call_1", "context_status", {})],
+            reasoning_content=reasoning,
+            raw={"id": "raw-1"},
+        ),
+        ModelResponse(content="状态已汇总", usage={"total_tokens": 20}, raw={"id": "raw-2"}),
+    ])
+    runtime = AgentRuntime(store, context, provider, ContextToolExecutor(context))
+    result = runtime.send(session_id, "检查状态")
+    assert result.final_event.payload == "状态已汇总"
+    # The continuation request must carry the original reasoning verbatim so
+    # DeepSeek thinking-mode tool calls do not fail with 400 on the next round.
+    tool_message = provider.messages[1][-2]
+    assert tool_message["role"] == "assistant"
+    assert tool_message["reasoning_content"] == reasoning
+    assert tool_message["tool_calls"][0]["id"] == "call_1"
+
+
+def test_agent_aggregates_token_stats(store, session_id, context):
+    provider = SequenceProvider([
+        ModelResponse(content="", tool_calls=[ToolCall("call_1", "context_status", {})], usage={
+            "total_tokens": 100, "completion_tokens": 5,
+            "prompt_cache_hit_tokens": 70, "prompt_cache_miss_tokens": 25,
+        }),
+        ModelResponse(content="统计完成", usage={
+            "total_tokens": 120, "completion_tokens": 15,
+            "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 25,
+        }),
+    ])
+    runtime = AgentRuntime(store, context, provider, ContextToolExecutor(context))
+    result = runtime.send(session_id, "汇总")
+    stats = result.stats
+    assert stats.total_tokens == 220
+    assert stats.completion_tokens == 20
+    assert stats.cache_hit_tokens == 150
+    assert stats.cache_miss_tokens == 50
+    assert stats.cache_hit_rate == 75.0
+    assert stats.elapsed_seconds >= 0
+    assert stats.tokens_per_second >= 0
+    assert result.to_dict()["stats"]["cache_hit_rate"] == 75.0

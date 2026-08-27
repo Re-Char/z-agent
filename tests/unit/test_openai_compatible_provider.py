@@ -35,7 +35,104 @@ def test_provider_maps_http_error_to_transport_error():
     client.close()
 
 
+def test_provider_surfaces_server_error_detail():
+    # DeepSeek-style JSON error body must reach the UI instead of being swallowed.
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"error": {"message": "Model Not Exist", "type": "invalid_request_error"}},
+        )
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="deepseek", client=client)
+    with pytest.raises(ModelTransportError) as excinfo:
+        provider.complete([], [])
+    assert "400" in str(excinfo.value)
+    assert "Model Not Exist" in str(excinfo.value)
+    client.close()
+
+
+def test_provider_surfaces_plain_text_error_body():
+    client = httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(401, text="Unauthorized")))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="glm-test", client=client)
+    with pytest.raises(ModelTransportError) as excinfo:
+        provider.complete([], [])
+    assert "Unauthorized" in str(excinfo.value)
+    client.close()
+
+
 def test_provider_requires_base_url():
     with pytest.raises(ValueError):
         OpenAICompatibleProvider(base_url="", model="missing")
 
+
+
+def test_provider_streams_content_and_assembles_response():
+    import json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["stream"] is True
+        chunks = [
+            {"choices": [{"delta": {"role": "assistant"}}]},
+            {"choices": [{"delta": {"content": "你好"}}]},
+            {"choices": [{"delta": {"content": "，世界"}}]},
+            {"choices": [{"delta": {"reasoning_content": "想了一下"}}]},
+            {"choices": [{"delta": {}}], "usage": {"total_tokens": 9}},
+            "[DONE]",
+        ]
+        payload = "\n".join(f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks)
+        return httpx.Response(200, text=payload + "\n")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="m", client=client)
+    events = list(provider.complete_stream([{"role": "user", "content": "hi"}], []))
+    contents = [e["text"] for e in events if e["type"] == "content"]
+    reasonings = [e["text"] for e in events if e["type"] == "reasoning"]
+    done = next(e for e in events if e["type"] == "done")["response"]
+    assert "".join(contents) == "你好，世界"
+    assert "".join(reasonings) == "想了一下"
+    assert done.content == "你好，世界"
+    assert done.reasoning_content == "想了一下"
+    assert done.usage["total_tokens"] == 9
+    client.close()
+
+
+def test_provider_stream_accumulates_tool_call_deltas():
+    import json
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        chunks = [
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "id": "call_1", "function": {"name": "fs_read", "arguments": ""}}
+            ]}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": "{\"path\":\"a"}}
+            ]}}]},
+            {"choices": [{"delta": {"tool_calls": [
+                {"index": 0, "function": {"arguments": ".py\"}"}}
+            ]}}]},
+            "[DONE]",
+        ]
+        payload = "\n".join(f"data: {json.dumps(chunk, ensure_ascii=False)}" for chunk in chunks)
+        return httpx.Response(200, text=payload + "\n")
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="m", client=client)
+    events = list(provider.complete_stream([], []))
+    done = next(e for e in events if e["type"] == "done")["response"]
+    assert done.tool_calls[0].name == "fs_read"
+    assert done.tool_calls[0].arguments == {"path": "a.py"}
+    client.close()
+
+
+def test_provider_stream_surfaces_http_error():
+    def unauthorized(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+    client = httpx.Client(transport=httpx.MockTransport(unauthorized))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="m", client=client)
+    events = list(provider.complete_stream([], []))
+    errors = [e["message"] for e in events if e["type"] == "error"]
+    assert errors and "bad key" in errors[0]
+    client.close()

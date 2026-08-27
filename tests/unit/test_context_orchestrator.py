@@ -15,9 +15,11 @@ def test_search_validates_arguments(context, session_id):
 
 def test_pin_and_unpin(context, store, session_id):
     event = store.append_event(session_id, "message", "user", "证据")
-    assert context.execute(session_id, "context_pin", {
+    result = context.execute(session_id, "context_pin", {
         "event_ids": [event.event_id], "rationale": "关键"
-    }) == {"pinned": [event.event_id]}
+    })
+    assert result["pinned"] == [event.event_id]
+    assert result["pinned_tokens"] >= 1
     assert event.event_id in context.build_working_set(session_id).pinned_event_ids
     context.execute(session_id, "context_unpin", {"event_ids": [event.event_id]})
     assert event.event_id not in context.build_working_set(session_id).pinned_event_ids
