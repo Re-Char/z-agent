@@ -1,15 +1,42 @@
+# Python / Conda
 .conda/
-.pytest_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+.venv/
+venv/
+env/
+ENV/
+.env
+.envrc
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
 *.egg-info/
-*.tsbuildinfo
-node_modules/
+.Python
+build/
 dist/
+.eggs/
+*.egg
+*.egg-link
+
+# Tests and static analysis
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
+.nox/
+
+# Node / Electron
+node_modules/
 apps/ui/dist/
-*.log
-.DS_Store
+*.tsbuildinfo
+
+# Local state and editor artifacts
 .zagent/
+.DS_Store
+*.log
+.idea/
+.vscode/
