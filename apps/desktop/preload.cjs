@@ -6,6 +6,33 @@ contextBridge.exposeInMainWorld("zagent", {
     method: options.method || "GET",
     body: options.body
   }),
+  // Streams a POST request: main process reads the SSE body and forwards events
+  // to the renderer over a private IPC channel until done/error.
+  requestStream: (path, options = {}, onEvent) => new Promise((resolve, reject) => {
+    const channel = `core:stream:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const cleanup = () => ipcRenderer.removeAllListeners(channel);
+    ipcRenderer.on(channel, (_event, payload) => {
+      if (payload && (payload.type === "done" || payload.type === "error")) {
+        cleanup();
+        resolve(payload);
+      } else if (payload && payload.type === "stream-error") {
+        cleanup();
+        reject(new Error(payload.message));
+      } else if (onEvent) {
+        onEvent(payload);
+      }
+    });
+    ipcRenderer.invoke("core:stream", {
+      path,
+      method: options.method || "POST",
+      body: options.body,
+      channel
+    }).catch((error) => {
+      cleanup();
+      reject(error);
+    });
+  }),
+  // Native directory picker (Electron only); null when cancelled/unavailable.
+  selectFolder: () => ipcRenderer.invoke("dialog:select-folder"),
   platform: process.platform
 });
-

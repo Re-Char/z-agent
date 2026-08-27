@@ -8,10 +8,13 @@ describe("Z-Agent desktop UI", () => {
     window.zagent = {
       platform: "darwin",
       request: vi.fn(async (path: string) => {
-        if (path === "/v1/sessions") return { sessions: [] };
+        if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws_test", name: "默认工作区", path: "", session_count: 0 }] };
+        if (path === "/v1/sessions" || path.startsWith("/v1/sessions?")) return { sessions: [] };
         if (path === "/v1/config") return {
           locale: "zh-CN",
-          model: { provider: "echo", model: "zagent-local", base_url: "", context_window: 32768, hard_limit_ratio: 0.82 }
+          model: { id: "model_test", name: "", provider: "echo", model: "zagent-local", base_url: "", context_window: 32768, hard_limit_ratio: 0.82, soft_limit_ratio: 0.7 },
+          models: [{ id: "model_test", name: "", provider: "echo", model: "zagent-local", base_url: "", context_window: 32768, hard_limit_ratio: 0.82, soft_limit_ratio: 0.7 }],
+          active_model_id: "model_test"
         };
         throw new Error(`unexpected path: ${path}`);
       }) as ZAgentBridge["request"]

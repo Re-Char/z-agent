@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
 const { spawn } = require("node:child_process");
 const { existsSync } = require("node:fs");
 const path = require("node:path");
@@ -112,6 +112,57 @@ ipcMain.handle("core:request", async (_event, request) => {
   const payload = await response.json();
   if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
   return payload;
+});
+
+ipcMain.handle("core:stream", async (event, request) => {
+  if (!coreInfo) throw new Error("核心服务不可用");
+  const response = await fetch(`http://${coreInfo.host}:${coreInfo.port}${request.path}`, {
+    method: request.method || "POST",
+    headers: { "Authorization": `Bearer ${coreInfo.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(request.body || {})
+  });
+  if (!response.ok || !response.body) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || `请求失败：${response.status}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let boundary;
+      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+        const rawEvent = buffer.slice(0, boundary).trim();
+        buffer = buffer.slice(boundary + 2);
+        if (!rawEvent.startsWith("data:")) continue;
+        const data = rawEvent.slice(5).trim();
+        if (!data) continue;
+        let payload;
+        try {
+          payload = JSON.parse(data);
+        } catch (_) {
+          continue;
+        }
+        event.sender.send(request.channel, payload);
+        if (payload.type === "done" || payload.type === "error") return;
+      }
+    }
+  } catch (error) {
+    event.sender.send(request.channel, { type: "stream-error", message: String(error) });
+  }
+});
+
+ipcMain.handle("dialog:select-folder", async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择工作区目录（agent 的安全边界）",
+    properties: ["openDirectory", "createDirectory"]
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
 });
 
 app.whenReady().then(createWindow).catch((error) => {
