@@ -56,6 +56,50 @@ class ExtensionRegistry:
                     seen.add(manifest.extension_id)
         return manifests
 
+    def create_extension(self, spec: Dict[str, Any]) -> ExtensionManifest:
+        """Create a declarative extension under the user data dir and return its manifest."""
+        extension_id = str(spec.get("id", "")).strip().lower()
+        if not EXTENSION_ID_RE.fullmatch(extension_id):
+            raise ValidationError(
+                "invalid extension id: use 3-128 chars of [a-z0-9._-], starting with a letter/digit"
+            )
+        runtime = str(spec.get("runtime", "declarative"))
+        allowed = ", ".join(sorted(ALLOWED_RUNTIMES))
+        if runtime not in ALLOWED_RUNTIMES:
+            raise ValidationError(f"unsupported runtime '{runtime}' (allowed: {allowed})")
+        contributes = [str(item) for item in spec.get("contributes", [])]
+        unknown = [item for item in contributes if item not in ALLOWED_CONTRIBUTIONS]
+        if unknown:
+            raise ValidationError(f"unknown contribution(s): {', '.join(unknown)}")
+        manifest_value = {
+            "id": extension_id,
+            "name": str(spec.get("name") or extension_id),
+            "version": str(spec.get("version") or "0.0.0"),
+            "runtime": runtime,
+            "entry": str(spec["entry"]) if spec.get("entry") else None,
+            "contributes": contributes,
+            "permissions": [str(item) for item in spec.get("permissions", [])],
+            "enabled": bool(spec.get("enabled", True)),
+        }
+        root = self._roots[0] / extension_id
+        root.mkdir(parents=True, exist_ok=True)
+        manifest_path = root / "zagent.extension.json"
+        manifest_path.write_text(json.dumps(manifest_value, ensure_ascii=False, indent=2), encoding="utf-8")
+        return self.load_manifest(manifest_path)
+
+    def remove_extension(self, extension_id: str) -> bool:
+        """Delete a user extension directory. Returns False when it does not exist."""
+        root = self._roots[0] / extension_id
+        if not root.exists() or not (root / "zagent.extension.json").is_file():
+            return False
+        for child in sorted(root.rglob("*"), reverse=True):
+            if child.is_file():
+                child.unlink()
+            elif child.is_dir():
+                child.rmdir()
+        root.rmdir()
+        return True
+
     def load_manifest(self, path: Path) -> ExtensionManifest:
         value = json.loads(path.read_text(encoding="utf-8"))
         extension_id = str(value.get("id", ""))
@@ -85,6 +129,7 @@ class ExtensionRegistry:
             contributes=contributes,
             permissions=list(value.get("permissions", [])),
             integrity=integrity,
+            enabled=bool(value.get("enabled", False)),
             status=status,
         )
 

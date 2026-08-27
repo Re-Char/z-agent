@@ -26,3 +26,34 @@ class ContextToolExecutor:
             raise ToolExecutionError(f"tool is not enabled in v1: {name}")
         return self._context.execute(session_id, name, arguments)
 
+
+class CombinedToolExecutor:
+    """Merges several tool executors into one schema list + dispatch table."""
+
+    def __init__(self, *executors: ToolExecutor) -> None:
+        self._executors = list(executors)
+        self._by_name: Dict[str, ToolExecutor] = {}
+        for executor in self._executors:
+            for schema in executor.schemas:
+                name = schema.get("function", {}).get("name")
+                if name:
+                    self._by_name[name] = executor
+
+    @property
+    def schemas(self) -> list[dict]:
+        merged: list[dict] = []
+        seen = set()
+        for executor in self._executors:
+            for schema in executor.schemas:
+                name = schema.get("function", {}).get("name")
+                if name and name not in seen:
+                    merged.append(schema)
+                    seen.add(name)
+        return merged
+
+    def execute(self, session_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+        executor = self._by_name.get(name)
+        if executor is None:
+            raise ToolExecutionError(f"tool is not enabled: {name}")
+        return executor.execute(session_id, name, arguments)
+

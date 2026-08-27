@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -11,6 +11,17 @@ class StrictRequest(BaseModel):
 
 class CreateSessionRequest(StrictRequest):
     title: str = Field(default="新任务", max_length=200)
+    workspace_id: Optional[str] = None
+
+
+class CreateWorkspaceRequest(StrictRequest):
+    name: str = Field(min_length=1, max_length=120)
+    path: str = Field(default="", max_length=1000)
+
+
+class UpdateWorkspaceRequest(StrictRequest):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    path: Optional[str] = Field(default=None, max_length=1000)
 
 
 class SendMessageRequest(StrictRequest):
@@ -23,6 +34,7 @@ class ExecuteContextToolRequest(StrictRequest):
 
 
 class UpdateModelRequest(StrictRequest):
+    name: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     base_url: Optional[str] = None
@@ -36,4 +48,30 @@ class UpdateModelRequest(StrictRequest):
 
     def model_patch(self) -> Dict[str, Any]:
         return self.model_dump(exclude_none=True, exclude={"api_key"})
+
+
+class CreateExtensionRequest(StrictRequest):
+    id: str = Field(min_length=3, max_length=128)
+    name: str = Field(default="", max_length=120)
+    version: str = Field(default="0.0.0", max_length=32)
+    runtime: str = Field(default="declarative", max_length=24)
+    entry: Optional[str] = Field(default=None, max_length=500)
+    contributes: List[str] = Field(default_factory=list)
+    permissions: List[str] = Field(default_factory=list)
+    enabled: bool = True
+
+    def spec(self) -> Dict[str, Any]:
+        return self.model_dump()
+
+
+class AddMcpServerRequest(StrictRequest):
+    name: str = Field(min_length=1, max_length=128)
+    transport: str = Field(default="stdio", max_length=8)
+    command: Optional[str] = Field(default=None, max_length=500)
+    args: List[str] = Field(default_factory=list)
+    url: Optional[str] = Field(default=None, max_length=1000)
+    enabled: bool = True
+
+    def spec(self) -> Dict[str, Any]:
+        return self.model_dump()
 

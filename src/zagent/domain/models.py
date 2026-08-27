@@ -37,6 +37,7 @@ class ToolCall:
 class ModelResponse:
     content: str
     tool_calls: List[ToolCall] = field(default_factory=list)
+    reasoning_content: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
     raw: Optional[Dict[str, Any]] = None
 
@@ -48,6 +49,24 @@ class WorkingSet:
     budget: int
     included_event_ids: List[str]
     pinned_event_ids: List[str]
+    dropped_pinned_ids: List[str] = field(default_factory=list)
+    pinned_tokens: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class TokenStats:
+    """Aggregated usage across a task: cache efficiency and generation speed."""
+
+    total_tokens: int = 0
+    completion_tokens: int = 0
+    cache_hit_tokens: int = 0
+    cache_miss_tokens: int = 0
+    cache_hit_rate: float = 0.0  # percent, 0-100
+    elapsed_seconds: float = 0.0
+    tokens_per_second: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -59,6 +78,7 @@ class AgentResult:
     working_set: WorkingSet
     model_usage: Optional[Dict[str, Any]]
     tool_rounds: int
+    stats: TokenStats = field(default_factory=TokenStats)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,5 +86,5 @@ class AgentResult:
             "working_set": self.working_set.to_dict(),
             "usage": self.model_usage,
             "tool_rounds": self.tool_rounds,
+            "stats": self.stats.to_dict(),
         }
-

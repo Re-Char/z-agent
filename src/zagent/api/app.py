@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import json
 from contextlib import asynccontextmanager
 from typing import Annotated, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from zagent.bootstrap import ApplicationContainer
 from zagent.domain.errors import NotFoundError, ZAgentError
 
-from .schemas import CreateSessionRequest, ExecuteContextToolRequest, SendMessageRequest, UpdateModelRequest
+from .schemas import (
+    AddMcpServerRequest,
+    CreateExtensionRequest,
+    CreateSessionRequest,
+    CreateWorkspaceRequest,
+    ExecuteContextToolRequest,
+    SendMessageRequest,
+    UpdateModelRequest,
+    UpdateWorkspaceRequest,
+)
 
 
 def _container_from_request(request: Request) -> ApplicationContainer:
@@ -50,13 +60,44 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     def update_model(body: UpdateModelRequest, core: CoreDependency) -> dict:
         return core.update_model(body.model_patch(), body.api_key)
 
+    @app.post("/v1/models", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def add_model(body: UpdateModelRequest, core: CoreDependency) -> dict:
+        return core.add_model(body.model_patch(), body.api_key)
+
+    @app.patch("/v1/models/{model_id}", dependencies=protected)
+    def update_model_by_id(model_id: str, body: UpdateModelRequest, core: CoreDependency) -> dict:
+        return core.update_model_by_id(model_id, body.model_patch(), body.api_key)
+
+    @app.delete("/v1/models/{model_id}", dependencies=protected)
+    def delete_model(model_id: str, core: CoreDependency) -> dict:
+        return core.delete_model(model_id)
+
+    @app.post("/v1/models/{model_id}/activate", dependencies=protected)
+    def activate_model(model_id: str, core: CoreDependency) -> dict:
+        return core.activate_model(model_id)
+
+    @app.get("/v1/workspaces", dependencies=protected)
+    def list_workspaces(core: CoreDependency) -> dict:
+        return {"workspaces": core.store.list_workspaces()}
+
+    @app.post("/v1/workspaces", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def create_workspace(body: CreateWorkspaceRequest, core: CoreDependency) -> dict:
+        return {"workspace": core.store.create_workspace(body.name, body.path)}
+
+    @app.patch("/v1/workspaces/{workspace_id}", dependencies=protected)
+    def update_workspace(workspace_id: str, body: UpdateWorkspaceRequest, core: CoreDependency) -> dict:
+        return {"workspace": core.store.update_workspace(workspace_id, body.name, body.path)}
+
     @app.get("/v1/sessions", dependencies=protected)
-    def list_sessions(core: CoreDependency) -> dict:
-        return {"sessions": core.store.list_sessions()}
+    def list_sessions(
+        core: CoreDependency,
+        workspace_id: str = Query(default=None),
+    ) -> dict:
+        return {"sessions": core.store.list_sessions(workspace_id)}
 
     @app.post("/v1/sessions", status_code=status.HTTP_201_CREATED, dependencies=protected)
     def create_session(body: CreateSessionRequest, core: CoreDependency) -> dict:
-        return core.store.create_session(body.title)
+        return core.store.create_session(body.title, body.workspace_id)
 
     @app.get("/v1/sessions/{session_id}/events", dependencies=protected)
     def list_events(
@@ -74,6 +115,21 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     ) -> dict:
         return core.agent.send(session_id, body.content).to_dict()
 
+    @app.post("/v1/sessions/{session_id}/messages/stream", dependencies=protected)
+    def stream_message(session_id: str, body: SendMessageRequest, core: CoreDependency) -> StreamingResponse:
+        def generate() -> AsyncIterator[str]:
+            try:
+                for event in core.agent.send_stream(session_id, body.content):
+                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except Exception as exc:  # noqa: BLE001 - surface any failure as a streamed error
+                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     @app.get("/v1/sessions/{session_id}/context", dependencies=protected)
     def context_status(session_id: str, core: CoreDependency) -> dict:
         return core.context.execute(session_id, "context_status", {})
@@ -88,8 +144,28 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     def list_extensions(core: CoreDependency) -> dict:
         return {"extensions": [extension.to_dict() for extension in core.extensions.discover()]}
 
+    @app.post("/v1/extensions", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def create_extension(body: CreateExtensionRequest, core: CoreDependency) -> dict:
+        return {"extension": core.extensions.create_extension(body.spec()).to_dict()}
+
+    @app.delete("/v1/extensions/{extension_id}", dependencies=protected)
+    def remove_extension(extension_id: str, core: CoreDependency) -> dict:
+        if not core.extensions.remove_extension(extension_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="extension not found")
+        return {"ok": True}
+
     @app.get("/v1/mcp/servers", dependencies=protected)
     def list_mcp_servers(core: CoreDependency) -> dict:
         return {"servers": core.mcp.list_servers()}
+
+    @app.post("/v1/mcp/servers", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def add_mcp_server(body: AddMcpServerRequest, core: CoreDependency) -> dict:
+        return {"server": core.mcp.add_server(body.spec())}
+
+    @app.delete("/v1/mcp/servers/{name}", dependencies=protected)
+    def remove_mcp_server(name: str, core: CoreDependency) -> dict:
+        if not core.mcp.remove_server(name):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP server not found")
+        return {"ok": True}
 
     return app

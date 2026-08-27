@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from zagent.agent.fs_tools import FileSystemToolExecutor
 from zagent.agent.runtime import AgentRuntime, AgentRuntimeLimits
-from zagent.agent.tools import ContextToolExecutor
+from zagent.agent.tools import CombinedToolExecutor, ContextToolExecutor
 from zagent.config import AppSettings
 from zagent.context.orchestrator import ContextOrchestrator
 from zagent.context.working_set import WorkingSetBuilder
+from zagent.domain.errors import NotFoundError
 from zagent.extensions import ExtensionRegistry, MCPConfigRegistry
 from zagent.providers import EchoProvider, OpenAICompatibleProvider
 from zagent.providers.base import ModelProvider
@@ -39,19 +41,34 @@ class ApplicationContainer:
         )
         self.context = ContextOrchestrator(self.store, working_sets)
         self._provider = self._create_provider()
+        tools = CombinedToolExecutor(
+            ContextToolExecutor(self.context),
+            FileSystemToolExecutor(self._workspace_path_for),
+        )
         self.agent = AgentRuntime(
             self.store,
             self.context,
             self._provider,
-            ContextToolExecutor(self.context),
+            tools,
             AgentRuntimeLimits(
                 max_tool_rounds=self.settings.max_tool_rounds,
                 task_timeout_seconds=self.settings.task_timeout_seconds,
             ),
         )
 
+    def _workspace_path_for(self, session_id: str) -> str:
+        """Security boundary: filesystem tools only reach the session's workspace root."""
+        session = self.store.get_session(session_id)
+        workspace_id = session.get("workspace_id")
+        if not workspace_id:
+            return ""
+        try:
+            return self.store.get_workspace(workspace_id).get("path", "")
+        except NotFoundError:
+            return ""
+
     def _create_provider(self) -> ModelProvider:
-        model = self.settings.model
+        model = self.settings.active_model
         if model.provider == "echo":
             return EchoProvider()
         return OpenAICompatibleProvider(
@@ -62,9 +79,46 @@ class ApplicationContainer:
         )
 
     def update_model(self, patch: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]:
+        """Backward-compatible update of the active profile."""
         self.settings.update_model(patch)
         if api_key:
-            self.secrets.set(self.settings.model.api_key_env, api_key)
+            self.secrets.set(self.settings.active_model.api_key_env, api_key)
+        self.settings.save()
+        self._build_runtime()
+        return self.settings.model_dump()
+
+    def add_model(self, patch: Dict[str, Any], api_key: Optional[str] = None) -> Dict[str, Any]:
+        profile = self.settings.upsert_model(patch)
+        if api_key:
+            self.secrets.set(profile.api_key_env, api_key)
+        self.settings.save()
+        self._build_runtime()
+        return self.settings.model_dump()
+
+    def update_model_by_id(
+        self, model_id: str, patch: Dict[str, Any], api_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        target = next((m for m in self.settings.models if m.id == model_id), None)
+        if target is None:
+            raise NotFoundError(f"model not found: {model_id}")
+        self.settings.upsert_model({**patch, "id": model_id})
+        if api_key:
+            env = patch.get("api_key_env") or target.api_key_env
+            self.secrets.set(env, api_key)
+        self.settings.save()
+        self._build_runtime()
+        return self.settings.model_dump()
+
+    def delete_model(self, model_id: str) -> Dict[str, Any]:
+        if not self.settings.delete_model(model_id):
+            raise NotFoundError(f"model not found: {model_id}")
+        self.settings.save()
+        self._build_runtime()
+        return self.settings.model_dump()
+
+    def activate_model(self, model_id: str) -> Dict[str, Any]:
+        if not self.settings.activate_model(model_id):
+            raise NotFoundError(f"model not found: {model_id}")
         self.settings.save()
         self._build_runtime()
         return self.settings.model_dump()

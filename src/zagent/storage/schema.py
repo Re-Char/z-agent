@@ -1,7 +1,14 @@
 SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS workspaces (
+    workspace_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    path TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    workspace_id TEXT REFERENCES workspaces(workspace_id),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -49,3 +56,9 @@ CREATE TABLE IF NOT EXISTS archives (
 );
 """
 
+# Best-effort migrations for databases created before the v2 schema.
+# Applied inside try/except: the column already exists on fresh databases.
+MIGRATIONS_SQL = [
+    # v1 -> v2: workspaces; sessions gain an optional workspace_id column.
+    """ALTER TABLE sessions ADD COLUMN workspace_id TEXT REFERENCES workspaces(workspace_id)""",
+]

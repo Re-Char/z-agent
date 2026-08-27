@@ -38,15 +38,24 @@ class ContextOrchestrator:
         values = arguments.model_dump()
         if tool_name == "context_status":
             working_set = self._working_sets.build(session_id)
+            warning = None
+            if working_set.dropped_pinned_ids:
+                warning = (
+                    f"{len(working_set.dropped_pinned_ids)} 个固定事件因超出上下文硬上限被丢弃："
+                    f"{', '.join(item[-8:] for item in working_set.dropped_pinned_ids[:3])}。"
+                    "请取消部分固定以恢复。"
+                )
+            elif working_set.token_estimate > working_set.budget:
+                warning = (
+                    "工作集已超过软预算（固定证据占用了预算外的硬上限空间），"
+                    "近期对话事件可能被挤出。建议取消部分固定。"
+                )
             return {
                 "stats": self._store.session_stats(session_id),
-                "working_set": {
-                    "tokens": working_set.token_estimate,
-                    "budget": working_set.budget,
-                    "included_event_ids": working_set.included_event_ids,
-                    "pinned_event_ids": working_set.pinned_event_ids,
-                },
+                "working_set": working_set.to_dict(),
                 "latest_archive": self._store.latest_archive(session_id),
+                "warning": warning,
+                "pinned_tokens": working_set.pinned_tokens,
             }
         if tool_name == "context_search":
             return {"results": self._store.search_events(session_id, values["query"], values["limit"])}
@@ -61,9 +70,25 @@ class ContextOrchestrator:
                 values["state_update"],
             )
         if tool_name == "context_pin":
+            # Entrance guard: pinned evidence must not eat the whole working-set
+            # budget (that would starve recent events and eventually blow the
+            # provider context window). Refuse with a readable error instead of
+            # silently accepting an unmanageable pin.
+            budget = self._working_sets.budget
+            pin_budget = int(budget * 0.30)
+            current = self._store.pinned_token_total(session_id)
+            additional = sum(
+                self._store.get_event(event_id).token_estimate
+                for event_id in values["event_ids"]
+            )
+            if current + additional > pin_budget:
+                raise ToolExecutionError(
+                    f"固定证据 token 总量将超过预算的 30%（{pin_budget} tokens，"
+                    f"当前 {current} + 新增 {additional}）。请先取消部分固定（context_unpin）再试。"
+                )
             for event_id in values["event_ids"]:
                 self._store.pin_event(session_id, event_id, values["rationale"])
-            return {"pinned": values["event_ids"]}
+            return {"pinned": values["event_ids"], "pinned_tokens": current + additional}
         if tool_name == "context_unpin":
             for event_id in values["event_ids"]:
                 self._store.unpin_event(session_id, event_id)

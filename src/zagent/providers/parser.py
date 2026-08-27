@@ -19,7 +19,16 @@ def parse_openai_compatible_response(raw: Dict[str, Any]) -> ModelResponse:
     content = message.get("content") or ""
     if not isinstance(content, str):
         content = json.dumps(content, ensure_ascii=False)
-    return ModelResponse(content=content, tool_calls=tool_calls, usage=raw.get("usage"), raw=raw)
+    reasoning_content = message.get("reasoning_content")
+    if reasoning_content is not None and not isinstance(reasoning_content, str):
+        reasoning_content = json.dumps(reasoning_content, ensure_ascii=False)
+    return ModelResponse(
+        content=content,
+        tool_calls=tool_calls,
+        reasoning_content=reasoning_content,
+        usage=raw.get("usage"),
+        raw=raw,
+    )
 
 
 def _parse_tool_calls(message: Dict[str, Any]) -> List[ToolCall]:
@@ -44,4 +53,3 @@ def _parse_tool_calls(message: Dict[str, Any]) -> List[ToolCall]:
         result.append(ToolCall(call_id=raw_call.get("id") or "call_" + uuid.uuid4().hex,
                                name=name, arguments=arguments))
     return result
-
