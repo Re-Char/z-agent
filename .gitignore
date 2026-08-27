@@ -1,0 +1,15 @@
+.conda/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.tsbuildinfo
+node_modules/
+dist/
+apps/ui/dist/
+*.log
+.DS_Store
+.zagent/

@@ -1,0 +1,23 @@
+appId: com.zagent.desktop
+productName: Z-Agent
+directories:
+  output: ../../dist/desktop
+files:
+  - main.cjs
+  - preload.cjs
+  - package.json
+  - from: ../ui/dist
+    to: ui
+extraResources:
+  - from: ../../src
+    to: core/src
+  - from: ../../pyproject.toml
+    to: core/pyproject.toml
+mac:
+  category: public.app-category.developer-tools
+  target: dmg
+win:
+  target: nsis
+linux:
+  target: AppImage
+
