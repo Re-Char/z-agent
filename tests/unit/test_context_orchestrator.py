@@ -3,9 +3,12 @@ import pytest
 from zagent.domain.errors import ToolExecutionError
 
 
-def test_status_reports_budget(context, session_id):
+def test_status_reports_budget_and_public_token_count(context, store, session_id):
+    store.append_event(session_id, "message", "user", "需要计入工作集的中文消息")
     result = context.execute(session_id, "context_status", {})
     assert result["working_set"]["budget"] > 0
+    assert result["working_set"]["tokens"] > 0
+    assert "token_estimate" not in result["working_set"]
 
 
 def test_search_validates_arguments(context, session_id):

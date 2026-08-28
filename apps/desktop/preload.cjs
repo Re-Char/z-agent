@@ -12,7 +12,7 @@ contextBridge.exposeInMainWorld("zagent", {
     const channel = `core:stream:${Date.now()}:${Math.random().toString(36).slice(2)}`;
     const cleanup = () => ipcRenderer.removeAllListeners(channel);
     ipcRenderer.on(channel, (_event, payload) => {
-      if (payload && (payload.type === "done" || payload.type === "error")) {
+      if (payload && (payload.type === "done" || payload.type === "error" || payload.type === "cancelled")) {
         cleanup();
         resolve(payload);
       } else if (payload && payload.type === "stream-error") {
@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld("zagent", {
       reject(error);
     });
   }),
+  cancelStream: () => ipcRenderer.invoke("core:stream-cancel"),
   // Native directory picker (Electron only); null when cancelled/unavailable.
   selectFolder: () => ipcRenderer.invoke("dialog:select-folder"),
   platform: process.platform

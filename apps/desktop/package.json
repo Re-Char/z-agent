@@ -2,13 +2,15 @@
   "name": "@zagent/desktop",
   "private": true,
   "version": "0.1.0",
+  "description": "中文优先、可审计的长程智能体桌面应用",
+  "author": "Re-Char",
   "main": "main.cjs",
   "scripts": {
     "dev": "ZAGENT_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
     "package": "electron-builder --config electron-builder.yml"
   },
   "devDependencies": {
-    "electron": "^44.0.0",
+    "electron": "44.0.0",
     "electron-builder": "^26.0.12"
   }
 }

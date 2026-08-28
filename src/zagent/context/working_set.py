@@ -50,9 +50,12 @@ class WorkingSetBuilder:
     def _build(self, session_id: str) -> WorkingSet:
         recent = [
             event for event in self._store.recent_events(session_id, self._recent_event_limit * 2)
-            if event.kind not in {"model_raw", "archive"}
+            if event.kind not in {"model_raw", "archive", "assistant_reasoning"}
         ][-self._recent_event_limit:]
-        pinned = self._store.pinned_events(session_id)
+        pinned = [
+            event for event in self._store.pinned_events(session_id)
+            if event.kind != "assistant_reasoning"
+        ]
         unique_events = {event.event_id: event for event in pinned + recent}
         ordered = sorted(unique_events.values(), key=lambda event: event.sequence)
         pinned_ids = {event.event_id for event in pinned}
@@ -145,9 +148,10 @@ class WorkingSetBuilder:
         workspace_path = self._workspace_path(session_id)
         if workspace_path:
             prompt += (
-                f"\n\n当前工作区（安全边界，可读取）：{workspace_path}\n"
-                "你有只读文件工具 fs_list / fs_read / fs_search / fs_project_overview，"
-                "只能访问该工作区目录。用户要求阅读、分析项目文件时，直接用这些工具读取。"
+                f"\n\n当前工作区（文件安全边界）：{workspace_path}\n"
+                "你有 fs_list / fs_read / fs_search / fs_project_overview / fs_write / fs_replace 工具，"
+                "只能访问该工作区目录。读取后应使用 fs_read 返回的 sha256 修改最新版本；"
+                "敏感文件、密钥、凭据、二进制文件、工作区外路径会被工具拒绝。"
             )
         else:
             prompt += (

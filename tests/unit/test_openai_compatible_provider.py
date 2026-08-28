@@ -136,3 +136,40 @@ def test_provider_stream_surfaces_http_error():
     errors = [e["message"] for e in events if e["type"] == "error"]
     assert errors and "bad key" in errors[0]
     client.close()
+
+
+def test_provider_retries_transient_status_but_not_bad_request():
+    attempts = 0
+
+    def transient(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(503, text="busy")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "恢复"}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(transient))
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1", model="m", client=client,
+        max_retries=2, retry_backoff_seconds=0,
+    )
+    assert provider.complete([], []).content == "恢复"
+    assert attempts == 3
+    client.close()
+
+    bad_attempts = 0
+
+    def bad_request(_: httpx.Request) -> httpx.Response:
+        nonlocal bad_attempts
+        bad_attempts += 1
+        return httpx.Response(400, text="invalid")
+
+    client = httpx.Client(transport=httpx.MockTransport(bad_request))
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1", model="m", client=client,
+        max_retries=2, retry_backoff_seconds=0,
+    )
+    with pytest.raises(ModelTransportError):
+        provider.complete([], [])
+    assert bad_attempts == 1
+    client.close()

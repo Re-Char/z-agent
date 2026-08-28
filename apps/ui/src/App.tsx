@@ -31,6 +31,17 @@ function payloadText(payload: unknown) {
   return typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
 }
 
+function eventPreview(event: Event) {
+  if (event.kind === "assistant_reasoning") return "思考过程（默认收起）";
+  if (event.kind === "assistant_tool_calls" && typeof event.payload === "object" && event.payload) {
+    const payload = event.payload as { tool_calls?: Array<{ name?: string }> };
+    const names = (payload.tool_calls || []).map((call) => call.name).filter(Boolean);
+    return names.length ? `工具调用：${names.join("、")}` : "工具调用";
+  }
+  if (event.role === "tool") return `${event.tool_name || "工具"} 已完成（详情默认隐藏）`;
+  return payloadText(event.payload);
+}
+
 function modelLabel(model: ModelConfig) {
   return model.name || `${model.provider} · ${model.model}`;
 }
@@ -72,28 +83,40 @@ function App() {
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [workspaceEditOpen, setWorkspaceEditOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [showToolTrace, setShowToolTrace] = useState(false);
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null);
+  const activeRefreshGeneration = useRef(0);
+  const sessionRefreshGeneration = useRef(0);
 
   const refreshWorkspaces = useCallback(async () => {
     const response = await api<{ workspaces: Workspace[] }>("/v1/workspaces");
     setWorkspaces(response.workspaces);
-    setActiveWorkspaceId((current) => current || response.workspaces[0]?.workspace_id);
+    setActiveWorkspaceId((current) => response.workspaces.some((item) => item.workspace_id === current)
+      ? current
+      : response.workspaces[0]?.workspace_id);
     return response.workspaces;
   }, []);
 
   const refreshSessions = useCallback(async (workspaceId?: string) => {
+    const generation = ++sessionRefreshGeneration.current;
     const query = workspaceId ? `?workspace_id=${workspaceId}` : "";
     const response = await api<{ sessions: Session[] }>(`/v1/sessions${query}`);
+    if (generation !== sessionRefreshGeneration.current) return;
     setSessions(response.sessions);
-    setActiveId((current) => current || response.sessions[0]?.session_id);
+    setActiveId((current) => response.sessions.some((item) => item.session_id === current)
+      ? current
+      : response.sessions[0]?.session_id);
   }, []);
 
   const refreshActive = useCallback(async (sessionId?: string) => {
+    const generation = ++activeRefreshGeneration.current;
     if (!sessionId) return;
     const [eventData, contextData] = await Promise.all([
       api<{ events: Event[] }>(`/v1/sessions/${sessionId}/events`),
       api<ContextStatus>(`/v1/sessions/${sessionId}/context`)
     ]);
+    if (generation !== activeRefreshGeneration.current) return;
     setEvents(eventData.events);
     setContext(contextData);
   }, []);
@@ -105,11 +128,13 @@ function App() {
     if (activeWorkspaceId) refreshSessions(activeWorkspaceId).catch((reason) => setError(friendlyError(reason)));
   }, [activeWorkspaceId, refreshSessions]);
   useEffect(() => { refreshActive(activeId).catch((reason) => setError(friendlyError(reason))); }, [activeId, refreshActive]);
+  useEffect(() => { setShowToolTrace(false); }, [activeId]);
 
   // --- auto-scroll: follow the newest content unless the user scrolled up ---
   const timelineRef = useRef<HTMLElement>(null);
   const stickToBottom = useRef(true);
   const prevActiveId = useRef<string | undefined>(undefined);
+  const cancelRequested = useRef(false);
   const handleTimelineScroll = () => {
     const el = timelineRef.current;
     if (!el) return;
@@ -126,9 +151,15 @@ function App() {
   }, [events, busy, activeId]);
 
   async function createSession() {
-    const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: "新任务", workspace_id: activeWorkspaceId } });
-    await refreshSessions(activeWorkspaceId);
-    setActiveId(session.session_id);
+    try {
+      const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: "新任务", workspace_id: activeWorkspaceId } });
+      await refreshSessions(activeWorkspaceId);
+      setActiveId(session.session_id);
+      setEvents([]);
+      setContext(undefined);
+    } catch (reason) {
+      setError(friendlyError(reason));
+    }
   }
 
   async function createWorkspace(workspace: Workspace) {
@@ -139,61 +170,87 @@ function App() {
   }
 
   async function switchWorkspace(workspaceId: string) {
+    activeRefreshGeneration.current += 1;
+    sessionRefreshGeneration.current += 1;
     setActiveWorkspaceId(workspaceId);
     setActiveId(undefined);
+    setSessions([]);
+    setEvents([]);
+    setContext(undefined);
+    setLastStats(undefined);
+    setError("");
   }
 
   async function send(event: FormEvent) {
     event.preventDefault();
     if (!input.trim() || busy) return;
-    let sessionId = activeId;
-    if (!sessionId) {
-      const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: input.slice(0, 24), workspace_id: activeWorkspaceId } });
-      sessionId = session.session_id;
-      setActiveId(sessionId);
-    }
     const content = input;
+    let sessionId = activeId;
     setInput("");
     setBusy(true);
+    cancelRequested.current = false;
     setError("");
-    // Optimistic render: show the user's message immediately.
-    const nextSequence = events.reduce((max, item) => Math.max(max, item.sequence), 0) + 1;
-    const optimistic: Event = {
-      event_id: `pending-${Date.now()}`, sequence: nextSequence,
-      timestamp: new Date().toISOString(), kind: "message", role: "user",
-      payload: content, token_estimate: 0,
-    };
-    setEvents((current) => [...current, optimistic]);
+    let optimistic: Event | null = null;
     try {
+      if (!sessionId) {
+        const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: content.slice(0, 24), workspace_id: activeWorkspaceId } });
+        sessionId = session.session_id;
+        setActiveId(sessionId);
+      }
+      const targetSessionId = sessionId;
+      // Optimistic render: show the user's message immediately after a session exists.
+      const nextSequence = events.reduce((max, item) => Math.max(max, item.sequence), 0) + 1;
+      optimistic = {
+        event_id: `pending-${Date.now()}`, sequence: nextSequence,
+        timestamp: new Date().toISOString(), kind: "message", role: "user",
+        payload: content, token_estimate: 0,
+      };
+      setEvents((current) => [...current, optimistic!]);
       if (window.zagent.requestStream) {
         // Streaming path: reply text appears progressively while the model thinks.
         let reply = "";
         const outcome = await window.zagent.requestStream<{ stats: TokenStats }>(
-          `/v1/sessions/${sessionId}/messages/stream`,
+          `/v1/sessions/${targetSessionId}/messages/stream`,
           { method: "POST", body: { content } },
           (streamEvent) => {
             if (streamEvent.type === "content") {
               reply += streamEvent.text || "";
-              setStreaming({ sessionId, text: reply });
+              setStreaming({ sessionId: targetSessionId, text: reply });
             }
           }
         );
+        if (outcome?.type === "cancelled") {
+          await Promise.all([refreshActive(targetSessionId), refreshSessions(activeWorkspaceId)]);
+          return;
+        }
         if (outcome?.message) throw new Error(outcome.message);
         if (outcome?.result && (outcome.result as { stats?: TokenStats }).stats) {
           setLastStats((outcome.result as { stats: TokenStats }).stats);
         }
       } else {
-        const result = await api<{ stats: TokenStats }>(`/v1/sessions/${sessionId}/messages`, { method: "POST", body: { content } });
+        const result = await api<{ stats: TokenStats }>(`/v1/sessions/${targetSessionId}/messages`, { method: "POST", body: { content } });
         setLastStats(result.stats);
       }
-      await Promise.all([refreshActive(sessionId), refreshSessions()]);
+      await Promise.all([refreshActive(targetSessionId), refreshSessions(activeWorkspaceId)]);
     } catch (reason) {
-      setEvents((current) => current.filter((item) => item.event_id !== optimistic.event_id));
-      setError(friendlyError(reason));
+      if (!cancelRequested.current) {
+        if (optimistic) {
+          setEvents((current) => current.filter((item) => item.event_id !== optimistic!.event_id));
+        }
+        setInput((current) => current || content);
+        setError(friendlyError(reason));
+      }
     } finally {
       setBusy(false);
       setStreaming(null);
     }
+  }
+
+  async function stopGeneration() {
+    cancelRequested.current = true;
+    setStreaming(null);
+    setShowToolTrace(false);
+    if (window.zagent.cancelStream) await window.zagent.cancelStream();
   }
 
   async function togglePin(item: Event) {
@@ -240,6 +297,17 @@ function App() {
   const ratioText = ratio > 0 && ratio < 1 ? ratio.toFixed(2) : String(Math.round(ratio));
   const pinnedIds = new Set(context?.working_set.pinned_event_ids || []);
   const softRatioPct = budget > 0 && softLimit > 0 ? softLimit / budget * 100 : 0;
+  const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId);
+  const isToolTrace = (item: Event) => item.kind === "assistant_tool_calls" || item.role === "tool";
+  const hasReasoning = (item: Event) => item.kind === "assistant_reasoning"
+    || (item.kind === "assistant_tool_calls" && typeof item.payload === "object" && item.payload !== null
+      && typeof (item.payload as { reasoning_content?: unknown }).reasoning_content === "string");
+  const toolTraceCount = events.filter(isToolTrace).length;
+  const visibleEvents = events.filter((item) =>
+    item.kind !== "model_raw"
+    && item.kind !== "archive"
+    && (showToolTrace || !isToolTrace(item) || hasReasoning(item))
+  );
 
   return <div className="app-shell">
     <aside className="sidebar">
@@ -248,8 +316,8 @@ function App() {
         <select className="workspace-switcher" value={activeWorkspaceId || ""} onChange={(event) => switchWorkspace(event.target.value)} title="工作区 = agent 的安全边界（可访问目录）">
           {workspaces.map((item) => <option key={item.workspace_id} value={item.workspace_id}>{item.name}{item.path ? ` · ${item.path}` : " · 未设置路径"}</option>)}
         </select>
-        <button className="workspace-add" onClick={() => setWorkspaceDialogOpen(true)} title="新建工作区">＋</button>
-        <button className="workspace-edit" onClick={() => setWorkspaceEditOpen(true)} title="编辑当前工作区的名称与路径">✎</button>
+        <button className="workspace-add" onClick={() => setWorkspaceDialogOpen(true)} title="新建工作区" aria-label="新建工作区">＋</button>
+        <button className="workspace-edit" onClick={() => setWorkspaceEditOpen(true)} title="编辑当前工作区的名称与路径" aria-label="编辑当前工作区">✎</button>
       </div>
       <button className="new-task" onClick={createSession}>＋ 新建对话</button>
       <div className="section-label">最近任务</div>
@@ -265,32 +333,51 @@ function App() {
 
     <main className="workspace">
       <header className="topbar">
-        <div>
-          <strong>{sessions.find((item) => item.session_id === activeId)?.title || "开始一个新任务"}</strong>
+        <div className="topbar-main">
+          <div className="topbar-title">
+            <strong>{sessions.find((item) => item.session_id === activeId)?.title || "开始一个新任务"}</strong>
+            <small>{activeWorkspace?.path || "工作区尚未设置项目路径"}</small>
+          </div>
           {config && config.models && config.models.length > 1
             ? <select className="model-switcher" value={config.active_model_id} onChange={(event) => switchModel(event.target.value)} title="切换模型">
                 {config.models.map((model) => <option key={model.id} value={model.id}>{modelLabel(model)}</option>)}
               </select>
             : <span className="model-pill">{config?.model.provider} · {config?.model.model}</span>}
         </div>
-        <span className="status-dot">核心在线</span>
+        <div className="topbar-actions">
+          <span className="status-dot">核心在线</span>
+          {toolTraceCount > 0 && <button type="button" className="tool-trace-toggle"
+            onClick={() => setShowToolTrace((visible) => !visible)} aria-pressed={showToolTrace}
+            aria-label={showToolTrace ? "隐藏工具记录" : "显示工具记录"}>
+            工具记录 {toolTraceCount}
+          </button>}
+          <button type="button" className="inspector-toggle" onClick={() => setInspectorOpen((open) => !open)} aria-label="切换上下文检查器" aria-expanded={inspectorOpen}>上下文</button>
+        </div>
       </header>
       <section className="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
-        {!events.length && <div className="empty-state"><div className="orb">知</div><h1>把复杂任务交给一个<br />记得住过程的智能体</h1><p>所有上下文都可追踪、可归档、可恢复。中文与工具参数各自保持准确。</p></div>}
-        {events.map((item) => <EventCard key={item.event_id} item={item} pinned={pinnedIds.has(item.event_id)} onTogglePin={togglePin} showPin={!!context} />)}
+        {!activeWorkspace?.path && <div className="workspace-notice">
+          <div><strong>先连接项目目录</strong><span>设置后才能读取和修改最新代码；密钥、凭据和工作区外文件始终不可访问。</span></div>
+          <button type="button" onClick={() => setWorkspaceEditOpen(true)}>设置工作区</button>
+        </div>}
+        {!visibleEvents.length && <div className="empty-state"><div className="orb">知</div><h1>从一个清晰的目标开始</h1><p>我会在工作区安全边界内阅读最新代码、调用工具并保留可追踪的上下文。</p><div className="empty-chips"><span>中文优先</span><span>代码可修改</span><span>敏感文件隔离</span></div></div>}
+        {visibleEvents.map((item) => <EventCard key={item.event_id} item={item} pinned={pinnedIds.has(item.event_id)} onTogglePin={togglePin} showPin={!!context} showToolTrace={showToolTrace} />)}
         {busy && streaming && streaming.sessionId === activeId && <article className="event assistant streaming-bubble">
           <div className="event-meta"><span>Z-Agent</span><code>正在输出…</code></div>
           <Markdown text={streaming.text || "…"} />
           <span className="streaming-caret" />
         </article>}
-        {busy && <div className="thinking"><i></i><i></i><i></i><span>正在组织上下文…</span></div>}
+        {busy && !streaming && <div className="thinking" role="status"><i></i><i></i><i></i><span>正在思考；完成后可手动展开</span></div>}
       </section>
-      {error && <div className="error-banner">{error}</div>}
-      <form className="composer" onSubmit={send}><textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder="描述你的任务，Enter 发送，Shift+Enter 换行" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} /><button disabled={busy || !input.trim()}>发送</button></form>
+      {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="关闭错误提示">×</button></div>}
+      <div className="composer-dock"><form className="composer" onSubmit={send}>
+        <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+        <button type={busy ? "button" : "submit"} className={`send-button${busy ? " stop" : ""}`} disabled={!busy && !input.trim()} aria-label={busy ? "停止生成" : "发送消息"} onClick={busy ? stopGeneration : undefined}>{busy ? "停止" : "发送"}</button>
+      </form><small>Enter 发送 · Shift+Enter 换行 · 文件修改会校验最新版本</small></div>
     </main>
 
-    <aside className="inspector">
-      <div className="inspector-title"><strong>上下文检查器</strong><span>LIVE</span></div>
+    {inspectorOpen && <button className="inspector-scrim" type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭上下文检查器" />}
+    <aside className={`inspector${inspectorOpen ? " open" : ""}`}>
+      <div className="inspector-title"><strong>上下文检查器</strong><div><span>LIVE</span><button type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭上下文检查器">×</button></div></div>
       {context?.warning && <div className="context-warning" role="alert">{context.warning}</div>}
       <div className="meter" title={`工作集 = 本次发送给模型的内容（系统提示 + 最近事件 + 固定证据），受预算限制。预算 = 上下文窗口 × 硬上限比例（当前 ${budget.toLocaleString()} tokens）。达到软上限（${softLimit.toLocaleString()}）后新事件可能被挤出。`}>
         <div><span>工作集占用</span><strong>{context?.working_set.tokens ? context.working_set.tokens.toLocaleString() : 0} / {budget.toLocaleString()}</strong></div>
@@ -311,7 +398,7 @@ function App() {
         {context?.working_set.included_event_ids.slice(-10).reverse().map((id) => {
           const event = events.find((item) => item.event_id === id);
           const pinned = pinnedIds.has(id);
-          const preview = event ? payloadText(event.payload).replace(/\s+/g, " ").slice(0, 42) : "";
+          const preview = event ? eventPreview(event).replace(/\s+/g, " ").slice(0, 42) : "";
           return <div key={id} className="ws-item">
             <span className={`ws-dot ${pinned ? "pinned" : ""}`} title={pinned ? "已固定为证据" : "普通事件"}>{pinned ? "📌" : "·"}</span>
             <code>{id.slice(-12)}</code>
@@ -344,40 +431,52 @@ function App() {
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose(): void; children: ReactNode }) {
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="modal"><header><h2>{title}</h2><button onClick={onClose}>×</button></header>{children}</section></div>;
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+      <header><h2>{title}</h2><button type="button" onClick={onClose} aria-label={`关闭${title}`}>×</button></header>
+      <div className="modal-content">{children}</div>
+    </section>
+  </div>;
 }
 
 function Collapsible({ summary, children, defaultOpen }: { summary: ReactNode; children: ReactNode; defaultOpen?: boolean }) {
   const [open, setOpen] = useState(!!defaultOpen);
   return <div className={`collapsible${open ? " open" : ""}`}>
-    <button type="button" className="collapsible-summary" onClick={() => setOpen(!open)}><span className="chevron">{open ? "▾" : "▸"}</span>{summary}</button>
+    <button type="button" className="collapsible-summary" aria-expanded={open} onClick={() => setOpen(!open)}><span className="chevron">{open ? "▾" : "▸"}</span>{summary}</button>
     {open && <div className="collapsible-body">{children}</div>}
   </div>;
 }
 
-function EventCard({ item, pinned, onTogglePin, showPin }: {
-  item: Event; pinned: boolean; onTogglePin(item: Event): void; showPin: boolean;
+function EventCard({ item, pinned, onTogglePin, showPin, showToolTrace }: {
+  item: Event; pinned: boolean; onTogglePin(item: Event): void; showPin: boolean; showToolTrace: boolean;
 }) {
   const isToolCallEvent = item.kind === "assistant_tool_calls";
   const isToolResult = item.role === "tool";
+  const isStandaloneReasoning = item.kind === "assistant_reasoning";
   const payload = item.payload;
-  const toolCallPayload = isToolCallEvent && typeof payload === "object" && payload !== null ? payload as { content?: string; tool_calls?: Array<{ call_id: string; name: string; arguments: unknown }>; reasoning_content?: string } : null;
+  const toolCallPayload = isToolCallEvent && typeof payload === "object" && payload !== null ? payload as { content?: string; reasoning_content?: string; tool_calls?: Array<{ call_id: string; name: string; arguments: unknown }> } : null;
+  const reasoning = isStandaloneReasoning && typeof payload === "string" ? payload : toolCallPayload?.reasoning_content;
+
+  const reasoningDisclosure = reasoning ? <Collapsible summary={<span className="reasoning-label">✦ 思考过程 <small>默认收起</small></span>}>
+    <Markdown text={reasoning} className="reasoning-content" />
+  </Collapsible> : null;
 
   function renderBody() {
+    if (isStandaloneReasoning) return reasoningDisclosure;
     if (toolCallPayload) {
       return <div className="tool-event-body">
-        {toolCallPayload.content ? <Markdown text={toolCallPayload.content} /> : null}
-        {(toolCallPayload.tool_calls || []).map((call) =>
+        {reasoningDisclosure}
+        {showToolTrace && (toolCallPayload.tool_calls || []).map((call) =>
           <Collapsible key={call.call_id} defaultOpen={false}
             summary={<span className="tool-line"><span className="tool-line-name">🔧 {call.name}</span>
               <span className="tool-line-args">{safeArgsSummary(call.arguments)}</span></span>}>
             <pre>{JSON.stringify(call.arguments, null, 2)}</pre>
           </Collapsible>)}
-        {toolCallPayload.reasoning_content
-          ? <Collapsible summary={<span className="tool-line thinking-line">🧠 思考过程（{toolCallPayload.reasoning_content.length} 字）</span>}>
-              <div className="thinking-text">{toolCallPayload.reasoning_content}</div>
-            </Collapsible>
-          : null}
       </div>;
     }
     if (isToolResult) {
@@ -390,15 +489,16 @@ function EventCard({ item, pinned, onTogglePin, showPin }: {
     return <pre>{payloadText(item.payload)}</pre>;
   }
 
-  return <article className={`event ${item.role}${pinned ? " pinned" : ""}`}>
+  const canPin = showPin && !isToolCallEvent && !isToolResult && !isStandaloneReasoning && item.role !== "system";
+  return <article className={`event ${item.role}${isToolCallEvent || isToolResult ? " tool-event" : ""}${reasoning ? " reasoning-event" : ""}${pinned ? " pinned" : ""}`}>
     <div className="event-meta"><span>{item.role === "user" ? "你" : item.role === "assistant" ? "Z-Agent" : item.kind}</span><code>#{item.sequence} · {formatClockTime(item.timestamp)} · {item.event_id.slice(-8)}</code></div>
     {renderBody()}
-    <div className="event-foot">
+    {(item.tool_name || canPin) && <div className="event-foot">
       {item.tool_name && <span className="tool-tag">{item.tool_name}</span>}
-      {showPin && item.role !== "system" && <button className={pinned ? "pin-btn active" : "pin-btn"} onClick={() => onTogglePin(item)} title={pinned ? "取消固定：该事件之后可被工作集预算清理" : "固定为证据：即使会话变长、事件超出工作集预算，这条也始终会发给模型，不会被挤掉"}>
+      {canPin && <button className={pinned ? "pin-btn active" : "pin-btn"} onClick={() => onTogglePin(item)} title={pinned ? "取消固定：该事件之后可被工作集预算清理" : "固定为证据：即使会话变长、事件超出工作集预算，这条也始终会发给模型，不会被挤掉"}>
         {pinned ? "已固定" : "固定"}
       </button>}
-    </div>
+    </div>}
   </article>;
 }
 
@@ -439,7 +539,7 @@ function EditWorkspaceModal({ workspace, onClose, onSaved }: {
     } finally { setSaving(false); }
   }
   return <Modal title="编辑工作区" onClose={onClose}><form className="settings" onSubmit={submit}>
-    <p className="settings-hint">工作区路径 = agent 的安全边界：文件工具只能读取该目录。设置后 agent 才能阅读你的项目文件。</p>
+    <p className="settings-hint">工作区路径是文件安全边界。Z-Agent 只能在这里读取和修改文本代码；修改前会校验最新版本，且不会读取 .env、私钥、凭据或工作区外文件。</p>
     <label>名称<input value={name} onChange={(event) => setName(event.target.value)} autoFocus /></label>
     <label className="path-field">路径
       <div className="path-row">
@@ -472,7 +572,7 @@ function CreateWorkspaceModal({ onClose, onCreated }: { onClose(): void; onCreat
     } finally { setSaving(false); }
   }
   return <Modal title="新建工作区" onClose={onClose}><form className="settings" onSubmit={submit}>
-    <p className="settings-hint">工作区 = agent 的安全边界：未来 agent 的代码与文件工具只能访问该工作区目录内的内容。每个工作区有独立的对话列表。</p>
+    <p className="settings-hint">工作区限定代码工具的访问范围。可以读取和修改其中的非敏感文本文件；.env、私钥、凭据、二进制和目录外路径始终拒绝。每个工作区拥有独立会话。</p>
     <label>名称<input value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：项目 A" autoFocus /></label>
     <label className="path-field">路径（agent 可访问的项目目录）
       <div className="path-row">

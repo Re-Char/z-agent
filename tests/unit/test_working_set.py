@@ -185,7 +185,8 @@ def test_context_status_warns_when_over_budget(store, session_id):
     # pinned (~2408) + recent (~1000) pushes the total past budget (3358) but stays under the hard cap (4096)
     assert status["warning"] is not None
     assert status["pinned_tokens"] >= 2000
-    assert status["working_set"]["token_estimate"] <= 4096
+    assert status["working_set"]["tokens"] <= 4096
+    assert "token_estimate" not in status["working_set"]
 
 
 def test_working_set_cached_until_context_changes(store, session_id, context):

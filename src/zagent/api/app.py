@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from zagent.bootstrap import ApplicationContainer
-from zagent.domain.errors import NotFoundError, ZAgentError
+from zagent.domain.errors import NotFoundError, ValidationError, ZAgentError
 
 from .schemas import (
     AddMcpServerRequest,
@@ -27,6 +28,18 @@ def _container_from_request(request: Request) -> ApplicationContainer:
 
 
 CoreDependency = Annotated[ApplicationContainer, Depends(_container_from_request)]
+
+
+def _workspace_path(path: str) -> str:
+    """Normalize configured roots early so an unusable boundary is never saved."""
+    if not path.strip():
+        return ""
+    candidate = Path(path).expanduser()
+    if not candidate.exists():
+        raise ValidationError(f"工作区路径不存在：{path}")
+    if not candidate.is_dir():
+        raise ValidationError(f"工作区路径不是目录：{path}")
+    return str(candidate.resolve())
 
 
 def create_api(container: ApplicationContainer, auth_token: Optional[str] = None) -> FastAPI:
@@ -82,11 +95,12 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
 
     @app.post("/v1/workspaces", status_code=status.HTTP_201_CREATED, dependencies=protected)
     def create_workspace(body: CreateWorkspaceRequest, core: CoreDependency) -> dict:
-        return {"workspace": core.store.create_workspace(body.name, body.path)}
+        return {"workspace": core.store.create_workspace(body.name, _workspace_path(body.path))}
 
     @app.patch("/v1/workspaces/{workspace_id}", dependencies=protected)
     def update_workspace(workspace_id: str, body: UpdateWorkspaceRequest, core: CoreDependency) -> dict:
-        return {"workspace": core.store.update_workspace(workspace_id, body.name, body.path)}
+        normalized_path = _workspace_path(body.path) if body.path is not None else None
+        return {"workspace": core.store.update_workspace(workspace_id, body.name, normalized_path)}
 
     @app.get("/v1/sessions", dependencies=protected)
     def list_sessions(

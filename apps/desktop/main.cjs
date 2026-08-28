@@ -7,6 +7,17 @@ const readline = require("node:readline");
 let mainWindow;
 let coreProcess;
 let coreInfo;
+let coreStartPromise;
+const activeStreamControllers = new Map();
+
+const DEFAULT_CORE_START_TIMEOUT_MS = 120000;
+
+function coreStartTimeoutMs() {
+  const configured = Number(process.env.ZAGENT_CORE_START_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_CORE_START_TIMEOUT_MS;
+}
 
 function coreRoot() {
   return app.isPackaged ? path.join(process.resourcesPath, "core") : path.resolve(__dirname, "../..");
@@ -14,7 +25,8 @@ function coreRoot() {
 
 function startCore() {
   if (coreInfo) return Promise.resolve(coreInfo);
-  return new Promise((resolve, reject) => {
+  if (coreStartPromise) return coreStartPromise;
+  coreStartPromise = new Promise((resolve, reject) => {
     const root = coreRoot();
     const condaPython = process.platform === "win32"
       ? path.join(root, ".conda", "envs", "zagent", "python.exe")
@@ -32,9 +44,17 @@ function startCore() {
       stdio: ["ignore", "pipe", "pipe"]
     });
     let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      coreStartPromise = undefined;
+      if (coreProcess && !coreProcess.killed) coreProcess.kill("SIGTERM");
+      reject(error);
+    };
     const timer = setTimeout(() => {
-      if (!settled) reject(new Error("核心服务启动超时"));
-    }, 15000);
+      fail(new Error(`核心服务启动超时（${Math.round(coreStartTimeoutMs() / 1000)} 秒）`));
+    }, coreStartTimeoutMs());
     readline.createInterface({ input: coreProcess.stdout }).on("line", (line) => {
       try {
         const message = JSON.parse(line);
@@ -42,6 +62,7 @@ function startCore() {
           settled = true;
           clearTimeout(timer);
           coreInfo = message;
+          coreStartPromise = undefined;
           resolve(message);
         }
       } catch (_) {
@@ -50,14 +71,15 @@ function startCore() {
     });
     coreProcess.stderr.on("data", (chunk) => console.error(`[core] ${chunk}`));
     coreProcess.once("error", (error) => {
-      clearTimeout(timer);
-      if (!settled) reject(error);
+      fail(error);
     });
     coreProcess.once("exit", (code) => {
-      if (!settled) reject(new Error(`核心服务退出：${code}`));
+      if (!settled) fail(new Error(`核心服务退出：${code}`));
       coreInfo = undefined;
+      coreProcess = undefined;
     });
   });
+  return coreStartPromise;
 }
 
 async function waitForCore() {
@@ -101,6 +123,16 @@ async function createWindow() {
   }
 }
 
+function responseError(payload, statusCode) {
+  if (typeof payload?.error === "string") return payload.error;
+  if (typeof payload?.detail === "string") return payload.detail;
+  if (Array.isArray(payload?.detail)) {
+    const messages = payload.detail.map((item) => item?.msg).filter(Boolean);
+    if (messages.length) return messages.join("；");
+  }
+  return `请求失败：${statusCode}`;
+}
+
 ipcMain.handle("core:request", async (_event, request) => {
   if (!coreInfo) throw new Error("核心服务不可用");
   const method = request.method || "GET";
@@ -110,25 +142,30 @@ ipcMain.handle("core:request", async (_event, request) => {
     body: method === "GET" ? undefined : JSON.stringify(request.body || {})
   });
   const payload = await response.json();
-  if (!response.ok) throw new Error(payload.error || `请求失败：${response.status}`);
+  if (!response.ok) throw new Error(responseError(payload, response.status));
   return payload;
 });
 
 ipcMain.handle("core:stream", async (event, request) => {
   if (!coreInfo) throw new Error("核心服务不可用");
-  const response = await fetch(`http://${coreInfo.host}:${coreInfo.port}${request.path}`, {
-    method: request.method || "POST",
-    headers: { "Authorization": `Bearer ${coreInfo.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify(request.body || {})
-  });
-  if (!response.ok || !response.body) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || `请求失败：${response.status}`);
-  }
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
+  const senderId = event.sender.id;
+  activeStreamControllers.get(senderId)?.controller.abort();
+  const controller = new AbortController();
+  activeStreamControllers.set(senderId, { controller, channel: request.channel, sender: event.sender });
   try {
+    const response = await fetch(`http://${coreInfo.host}:${coreInfo.port}${request.path}`, {
+      method: request.method || "POST",
+      headers: { "Authorization": `Bearer ${coreInfo.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(request.body || {}),
+      signal: controller.signal
+    });
+    if (!response.ok || !response.body) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(responseError(payload, response.status));
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -146,13 +183,34 @@ ipcMain.handle("core:stream", async (event, request) => {
         } catch (_) {
           continue;
         }
+        // Provider reasoning is required internally for some tool-call protocols,
+        // but it is never part of the renderer contract or product UI.
+        if (payload.type === "reasoning") continue;
         event.sender.send(request.channel, payload);
         if (payload.type === "done" || payload.type === "error") return;
       }
     }
+    if (!controller.signal.aborted) {
+      event.sender.send(request.channel, { type: "stream-error", message: "模型数据流意外结束" });
+    }
   } catch (error) {
-    event.sender.send(request.channel, { type: "stream-error", message: String(error) });
+    if (!controller.signal.aborted) {
+      event.sender.send(request.channel, { type: "stream-error", message: String(error) });
+    }
+  } finally {
+    if (activeStreamControllers.get(senderId)?.controller === controller) {
+      activeStreamControllers.delete(senderId);
+    }
   }
+});
+
+ipcMain.handle("core:stream-cancel", (event) => {
+  const active = activeStreamControllers.get(event.sender.id);
+  if (!active) return { cancelled: false };
+  active.sender.send(active.channel, { type: "cancelled" });
+  active.controller.abort();
+  activeStreamControllers.delete(event.sender.id);
+  return { cancelled: true };
 });
 
 ipcMain.handle("dialog:select-folder", async () => {

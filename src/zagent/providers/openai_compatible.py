@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
@@ -30,6 +31,8 @@ class OpenAICompatibleProvider:
         api_key: str = "",
         temperature: float = 0.2,
         timeout_seconds: float = 120,
+        max_retries: int = 2,
+        retry_backoff_seconds: float = 0.25,
         client: Optional[httpx.Client] = None,
     ) -> None:
         if not base_url:
@@ -37,6 +40,8 @@ class OpenAICompatibleProvider:
         self._endpoint = self._chat_endpoint(base_url)
         self._model = model
         self._temperature = temperature
+        self._max_retries = max(0, max_retries)
+        self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
         self._client = client or httpx.Client(timeout=timeout_seconds)
         self._owns_client = client is None
         self._headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -48,17 +53,27 @@ class OpenAICompatibleProvider:
 
     def complete(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> ModelResponse:
         payload = self._payload(messages, tools, stream=False)
-        try:
-            response = self._client.post(self._endpoint, headers=self._headers, json=payload)
-            response.raise_for_status()
-            raw = response.json()
-        except httpx.HTTPStatusError as exc:
-            detail = self._error_detail(exc.response)
-            raise ModelTransportError(
-                f"model request failed ({exc.response.status_code}): {detail}"
-            ) from exc
-        except (httpx.HTTPError, ValueError) as exc:
-            raise ModelTransportError(f"model request failed: {exc}") from exc
+        for attempt in range(self._max_retries + 1):
+            try:
+                response = self._client.post(self._endpoint, headers=self._headers, json=payload)
+                response.raise_for_status()
+                raw = response.json()
+                break
+            except httpx.HTTPStatusError as exc:
+                if self._should_retry(exc.response.status_code, attempt):
+                    self._backoff(attempt)
+                    continue
+                detail = self._error_detail(exc.response)
+                raise ModelTransportError(
+                    f"model request failed ({exc.response.status_code}): {detail}"
+                ) from exc
+            except httpx.HTTPError as exc:
+                if attempt < self._max_retries:
+                    self._backoff(attempt)
+                    continue
+                raise ModelTransportError(f"model request failed: {exc}") from exc
+            except ValueError as exc:
+                raise ModelTransportError(f"model request failed: {exc}") from exc
         return parse_openai_compatible_response(raw)
 
     def complete_stream(
@@ -71,21 +86,36 @@ class OpenAICompatibleProvider:
         {"type": "error", "message": str}
         """
         payload = self._payload(messages, tools, stream=True)
-        try:
-            with self._client.stream(
-                "POST", self._endpoint, headers=self._headers, json=payload
-            ) as response:
-                if response.status_code != 200:
-                    response.read()
-                    detail = self._error_detail(response)
-                    yield {
-                        "type": "error",
-                        "message": f"model request failed ({response.status_code}): {detail}",
-                    }
+        for attempt in range(self._max_retries + 1):
+            try:
+                with self._client.stream(
+                    "POST", self._endpoint, headers=self._headers, json=payload
+                ) as response:
+                    if response.status_code != 200:
+                        response.read()
+                        if self._should_retry(response.status_code, attempt):
+                            self._backoff(attempt)
+                            continue
+                        detail = self._error_detail(response)
+                        yield {
+                            "type": "error",
+                            "message": f"model request failed ({response.status_code}): {detail}",
+                        }
+                        return
+                    yield from self._iter_sse(response)
                     return
-                yield from self._iter_sse(response)
-        except httpx.HTTPError as exc:
-            yield {"type": "error", "message": f"model request failed: {exc}"}
+            except httpx.HTTPError as exc:
+                if attempt < self._max_retries:
+                    self._backoff(attempt)
+                    continue
+                yield {"type": "error", "message": f"model request failed: {exc}"}
+                return
+
+    def _should_retry(self, status_code: int, attempt: int) -> bool:
+        return attempt < self._max_retries and (status_code == 429 or status_code >= 500)
+
+    def _backoff(self, attempt: int) -> None:
+        time.sleep(self._retry_backoff_seconds * (2 ** attempt))
 
     def _payload(self, messages, tools, *, stream: bool) -> Dict[str, Any]:
         return {

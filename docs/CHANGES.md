@@ -1,7 +1,7 @@
 # Z-Agent 改动概览（for Codex）
 
 > 面向后续接手者的快速导航。基线：`eda4ff1`（"merge remote repository initialization"）。
-> 本分支相对基线包含 7 轮迭代，覆盖后端核心、前端交互、上下文管理三块。
+> 本分支相对基线包含 9 轮迭代，覆盖后端核心、前端交互、上下文管理和工作区安全四块。
 
 ## 一分钟速览
 
@@ -10,7 +10,7 @@
 | DeepSeek 400 修复 | ✅ | `src/zagent/config.py`、`providers/openai_compatible.py`、`providers/parser.py` |
 | 多模型配置与切换 | ✅ | `src/zagent/config.py`、`bootstrap.py`、`api/app.py`、`apps/ui/src/App.tsx` |
 | 工作区（安全边界） | ✅ | `storage/schema.py`、`storage/sqlite_store.py`、`api/app.py`、`App.tsx` |
-| 文件系统工具（只读） | ✅ | `src/zagent/agent/fs_tools.py`（新） |
+| 文件系统工具（安全读写） | ✅ | `src/zagent/agent/fs_tools.py` |
 | 流式输出（SSE） | ✅ | `providers/openai_compatible.py`、`agent/runtime.py`、`api/app.py`、`apps/desktop/*` |
 | 上下文管理修复 | ✅ | `context/working_set.py`、`context/orchestrator.py`、`storage/sqlite_store.py` |
 | 前端交互打磨 | ✅ | `App.tsx`、`styles.css`、`Markdown.tsx`（新） |
@@ -37,9 +37,11 @@
 - 前端：侧边栏工作区切换 + 新建/编辑弹窗（Electron 原生文件夹选择器 `dialog:select-folder`）
 - 注意：**Electron 不支持 `window.prompt/confirm`**（返回 undefined）——所有确认/输入框必须用自定义 Modal（`ConfirmDialog`/`CreateWorkspaceModal`）
 
-### 4. 文件系统工具（`fs_tools.py`，只读）
-- `fs_project_overview` / `fs_list` / `fs_read` / `fs_search`
-- 路径穿越防护 + 跳过 `.git`/`node_modules`/`__pycache__` 等
+### 4. 文件系统工具（`fs_tools.py`，安全读写）
+- 读取：`fs_project_overview` / `fs_list` / `fs_read` / `fs_search`；修改：`fs_write` / `fs_replace`
+- 路径穿越与符号链接逃逸防护；跳过 `.git`/依赖/构建目录；禁止 `.env`、凭据、私钥、二进制等敏感目标
+- `fs_read` 返回完整内容 SHA-256；更新已有文件必须携带该版本指纹，过期写入会被拒绝
+- 同目录临时文件 + `fsync` + `os.replace` 原子落盘；没有删除、命令执行或任意 shell 工具
 - system prompt 注入当前工作区路径与工具能力说明（无路径时明确告知）
 - `fs_search` 对 >512KB 文件只扫头部 32KB 并标注 `partial`
 
@@ -61,15 +63,29 @@
 - 事件时间/会话相对时间显示、工作集列表可取消固定
 
 ### 7. Markdown 渲染
-- `apps/ui/src/Markdown.tsx`：`marked` + `DOMPurify`（防 XSS），assistant 消息渲染；代码块悬停复制按钮
+- `apps/ui/src/Markdown.tsx`：`marked` + `DOMPurify`（防 XSS），assistant 消息渲染；代码块语言栏、复制按钮、表格横向滚动和安全外链
 - 新依赖：`marked@18`、`dompurify@3`（已写入 `apps/ui/package.json`）
+
+### 8. 全面复验修正
+- 修复 `context_status` 公共响应字段：内部 `token_estimate` 统一转换为前端契约 `working_set.tokens`，解决 inspector 明明列出工作集事件但占用仍显示 0 的问题。
+- 修正 `fs_search` 大文件语义：超过 512KB 时只读取头部 32K 字符；命中项明确返回 `partial: true`，并补充“头部命中/尾部不误报”测试。
+- Electron Core 启动改为单例 Promise、可配置 120 秒超时；超时或启动失败会终止子进程并清理状态，避免慢机器上的 15 秒误判和残留 Core。
+- 前端首屏测试改为同步断言，移除对静态文本不必要的 `waitFor`。
+
+### 9. 前端、思考折叠与工作区强化
+- 重做 Electron 三栏布局、顶部栏、时间线、输入区、弹窗、错误条和响应式 Context Inspector；聊天内容固定在可读宽度，不再偏右或贴边。
+- 模型 `reasoning_content` 会保留为可审计事件，但 UI 永远默认收起，只有用户点击“思考过程”才渲染正文；点击停止不会自动展开。实时 reasoning delta 不向 renderer 推送，工具记录也独立默认隐藏。
+- 增加停止生成：renderer → preload → Electron main 的 AbortController 链路，取消不是错误且会刷新已持久化事件。
+- 工作区切换立即清空旧会话状态；刷新始终携带当前 workspace ID；新增/编辑路径会在保存前验证为真实目录并规范化。
+- OpenAI-compatible provider 对网络错误、429 和 5xx 做有限指数退避；400 等客户端配置错误不重试，直接展示服务端原因。
+- Electron 固定为 `44.0.0`，electron-builder 可生成 macOS arm64 DMG。
 
 ## 验证状态
 
-- Python：**95 个测试通过**（`PYTHONPATH=src conda run --prefix .conda/envs/zagent pytest -q`）
-- 前端：typecheck（`tsc -b`）+ vitest + build 全绿
+- Python：**102 个测试通过**，覆盖率 **83.63%**（门槛 80%）
+- 前端：**6 个 Vitest 测试** + strict typecheck + Vite production build 全绿
 - E2E（真实 DeepSeek）：读文件 → 流式输出 → 折叠展示 → 归档/固定 → 无 400/500
-- 详细验证记录：`docs/verification-report.md`（7 轮迭代逐项记录）
+- 详细验证记录：`docs/verification-report.md`（9 轮迭代逐项记录）
 
 ## 接手注意事项
 

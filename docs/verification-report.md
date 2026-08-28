@@ -251,3 +251,59 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 
 - 全量 95 测试通过（新增原子性 1、缓存 2、排序 1、partial 1）
 - 真实 DeepSeek E2E：fs 工具读 package.json 给出具体优化意见（"去掉 test:core 的 PYTHONPATH 前缀"）、流式输出、无警告无错误
+
+## 12. 全面复验（第八轮：DeepSeek 链路、契约与启动健壮性）
+
+### 12.1 真实 Electron → DeepSeek 链路
+
+- 普通流式请求实测：输入“请只回复：链路正常”，返回“链路正常”，无 400/500。
+- thinking + tool calling 实测：模型先调用 `context_status`，工具结果返回后继续生成“工具链路正常”；说明 assistant tool round 的 `reasoning_content` 已被正确保存并回传。
+- 当前有效模型为 `deepseek-v4-flash`，官方端点归一化为 `https://api.deepseek.com`。
+
+### 12.2 本轮发现并修复
+
+| 问题 | 根因 | 修复与回归 |
+|---|---|---|
+| inspector 工作集占用显示 0 | 后端返回 `token_estimate`，前端读取 `tokens` | orchestrator 在公共响应边界转换字段；API、orchestrator、超预算测试均断言 `tokens` |
+| `fs_search` 的 partial 文档与实现不一致 | 大文件此前被直接跳过，返回项永远 `partial: false` | >512KB 只读头部 32K；头部命中返回 `partial: true`，尾部不误报 |
+| 慢环境 Electron Core 15 秒误超时 | 固定超时过短，失败后启动状态/子进程清理不完整 | 默认 120 秒且支持 `ZAGENT_CORE_START_TIMEOUT_MS`；共享启动 Promise；失败时终止并清理 |
+| 前端首屏测试慢环境伪超时 | 静态首屏断言使用了不必要的异步轮询 | 改为同步断言 |
+
+### 12.3 最终回归（2026-08-28）
+
+- Python 全量：96 passed，0 failed（0.46s）；覆盖率上一轮为 84.14%，门槛 80%。
+- Python 定向：34 passed（fs/context/API/working set）。
+- Ruff：通过。
+- UI Vitest：1 passed（45ms）；TypeScript typecheck：通过。
+- Vite production build：通过，JS 295.90KB（gzip 94.37KB），CSS 16.49KB（gzip 4.45KB）。
+- Electron `main.cjs` / `preload.cjs` 语法检查：通过。
+- 已知非功能警告：FastAPI TestClient 依赖触发 Starlette 的 httpx 弃用提示，建议升级测试栈。
+
+## 13. 前端与工作区安全复验（第九轮）
+
+### 13.1 已实现修正
+
+- Electron 桌面布局重构：聊天列居中并限制可读宽度，composer 与正文同轴；检查器在窄屏变为带遮罩的右侧抽屉。
+- 思考折叠：事件历史保留 `reasoning_content` 供用户审计，但默认只出现“思考过程”折叠栏；实时 reasoning SSE 不转发，工具记录独立默认隐藏，工作集预览只显示安全摘要。
+- Markdown：DOMPurify 消毒，代码块语言栏/复制按钮，表格滚动容器，外链使用 `noopener noreferrer`。
+- 工作区：切换时清除旧事件；会话刷新按 workspace 过滤；路径保存前验证；文件读取返回 SHA-256，已有文件更新采用版本锁与原子替换。
+- 操作体验：支持停止生成、错误提示关闭、Escape/遮罩关闭弹窗、目录未设置时提供明确 CTA。
+- 稳定性：429/5xx/网络错误有限重试，400 不重试；Electron Core 单例启动与 120 秒上限；Electron 版本固定以保证可打包。
+
+### 13.2 自动化结果（2026-08-28）
+
+- `npm test`：通过。
+- Python：102 passed，覆盖率 83.63%（门槛 80%）；Ruff 通过。
+- UI：6 passed；TypeScript strict typecheck 通过。
+- Vite production build：JS 300.54KB（gzip 95.74KB），CSS 20.26KB（gzip 5.46KB）。
+- Electron `main.cjs` / `preload.cjs` 语法检查通过。
+- electron-builder：成功生成 `dist/desktop/Z-Agent-0.1.0-arm64.dmg`；当前本地包未签名，使用默认图标。
+- 该 DMG 仍是开发分发产物：尚未内置 Python runtime，目标机器需通过 `ZAGENT_PYTHON` 或系统 Python 提供 Core 依赖；发布版需增加可重定位 Core bundle、签名与公证。
+
+### 13.3 实机与响应式检查
+
+- Electron 真实窗口中 Thinking 只显示“思考过程 / 默认收起”，无正文泄露；工具调用与结果默认隐藏，但可通过独立开关审计。
+- 用户消息改为右对齐的内容自适应气泡，最大宽度 76%，长文本不再从主内容区最左边铺满。
+- 1440×900：侧栏 248px、主区 884px、检查器 308px，总宽精确等于 viewport，无横向溢出。
+- 1024×768：检查器默认移出视口，点击“上下文”后成为 330px 抽屉；页面 `scrollWidth` 等于 viewport。
+- 完成后已停止本次启动的 Vite、Electron 与 Core 进程。

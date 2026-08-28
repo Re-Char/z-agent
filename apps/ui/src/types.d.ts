@@ -1,5 +1,5 @@
 interface StreamEvent {
-  type: "content" | "reasoning" | "tool_call" | "done" | "error";
+  type: "content" | "tool_call" | "done" | "error" | "cancelled";
   text?: string;
   result?: unknown;
   message?: string;
@@ -7,7 +7,8 @@ interface StreamEvent {
 
 interface ZAgentBridge {
   request<T>(path: string, options?: { method?: string; body?: unknown }): Promise<T>;
-  requestStream?<T>(path: string, options?: { method?: string; body?: unknown }, onEvent?: (event: StreamEvent) => void): Promise<{ result?: T; message?: string }>;
+  requestStream?<T>(path: string, options?: { method?: string; body?: unknown }, onEvent?: (event: StreamEvent) => void): Promise<{ result?: T; message?: string; type?: string }>;
+  cancelStream?(): Promise<{ cancelled: boolean }>;
   selectFolder?(): Promise<string | null>;
   platform: string;
 }

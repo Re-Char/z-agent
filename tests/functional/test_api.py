@@ -20,6 +20,7 @@ def test_api_session_message_and_context_flow(tmp_path):
             context = client.get(f"/v1/sessions/{session_id}/context", headers=headers)
             assert context.status_code == 200
             assert context.json()["stats"]["count"] >= 3
+            assert context.json()["working_set"]["tokens"] > 0
     finally:
         container.close()
 
@@ -30,6 +31,39 @@ def test_api_rejects_missing_auth(tmp_path):
         with TestClient(create_api(container, auth_token="secret")) as client:
             assert client.get("/v1/sessions").status_code == 401
             assert client.get("/health").status_code == 200
+    finally:
+        container.close()
+
+
+def test_api_exposes_reasoning_for_explicit_collapsed_ui_but_hides_internal_events(tmp_path):
+    container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
+    try:
+        session = container.store.create_session("安全展示")
+        container.store.append_event(
+            session["session_id"],
+            "assistant_tool_calls",
+            "assistant",
+            {
+                "content": "",
+                "reasoning_content": "可由用户手动展开的思考",
+                "tool_calls": [{"call_id": "c1", "name": "context_status", "arguments": {}}],
+            },
+        )
+        container.store.append_event(
+            session["session_id"], "model_raw", "system", {"secret": "raw"},
+            sensitivity="internal",
+        )
+        with TestClient(create_api(container, auth_token="test-token")) as client:
+            response = client.get(
+                f"/v1/sessions/{session['session_id']}/events",
+                headers={"Authorization": "Bearer test-token"},
+            )
+            assert response.status_code == 200
+            events = response.json()["events"]
+            assert len(events) == 1
+            payload = events[0]["payload"]
+            assert payload["reasoning_content"] == "可由用户手动展开的思考"
+            assert payload["tool_calls"][0]["name"] == "context_status"
     finally:
         container.close()
 
@@ -109,10 +143,12 @@ def test_api_workspace_flow(tmp_path):
     try:
         with TestClient(create_api(container, auth_token="test-token")) as client:
             headers = {"Authorization": "Bearer test-token"}
+            project_path = tmp_path / "project"
+            project_path.mkdir()
             workspaces = client.get("/v1/workspaces", headers=headers).json()["workspaces"]
             assert len(workspaces) == 1
             created = client.post("/v1/workspaces", headers=headers, json={
-                "name": "项目", "path": "/tmp/project",
+                "name": "项目", "path": str(project_path),
             })
             assert created.status_code == 201
             ws_id = created.json()["workspace"]["workspace_id"]
@@ -124,5 +160,11 @@ def test_api_workspace_flow(tmp_path):
             listed = client.get(f"/v1/sessions?workspace_id={ws_id}", headers=headers).json()["sessions"]
             assert [item["title"] for item in listed] == ["项目会话"]
             assert client.get("/v1/workspaces", headers=headers).json()["workspaces"][1]["name"] == "项目"
+            rejected = client.patch(
+                f"/v1/workspaces/{ws_id}", headers=headers,
+                json={"path": str(tmp_path / "missing")},
+            )
+            assert rejected.status_code == 400
+            assert "路径不存在" in rejected.json()["error"]
     finally:
         container.close()

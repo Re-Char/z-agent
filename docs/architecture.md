@@ -387,9 +387,26 @@ Core service 是独立可执行进程，GUI 崩溃或重启不应破坏任务和
 - Permission Center：工具、MCP server、extension 的权限、来源、哈希、网络域名和最后使用时间；
 - 中文优先：完整 CJK 字体回退、中文日期/数字格式，以及中文/英文不互相破坏的 code block 与 Markdown 渲染。
 
-不把模型思维链作为产品功能或持久化数据；GUI 展示可审计的动作、工具输入输出和显式任务状态。
+模型思考内容不应抢占主对话，也不得默认展开。Core 保存厂商协议续轮所必需的
+`reasoning_content`，最终轮 reasoning 另存为 `assistant_reasoning` 审计事件；前端仅显示默认收起的
+“思考过程”披露栏，用户点击后才渲染正文。实时 reasoning delta 不经 Electron IPC 推送，
+`assistant_reasoning` 也不进入后续 WorkingSet，避免重复注入模型上下文。工具调用与结果使用另一套
+默认隐藏的审计开关。
 
-### 14.4 打包与发布
+### 14.4 工作区代码工具安全边界
+
+工作区路径在保存时必须是实际目录，并规范化为绝对路径。所有文件工具再次执行
+`resolve`/父目录校验，符号链接也不能逃逸。v1 只提供有界文本能力：
+
+- 读取、目录概览和关键词检索；二进制、大文件、依赖/构建目录和常见密钥文件受限；
+- 新建文本文件，或用 `fs_read` 返回的 SHA-256 乐观锁更新已有文件；
+- 精确文本替换默认只允许唯一匹配，写入使用同目录临时文件原子替换；
+- 不提供删除、任意命令、shell、提权、网络上传或工作区外访问。
+
+这不是完整 OS 沙箱。未来引入终端、扩展 host 或 MCP 文件工具时，必须经过独立 permission
+broker，不能复用 v1 文件工具的信任结论。
+
+### 14.5 打包与发布
 
 使用 npm workspace 管理 `desktop`、`ui`、`core-client` 和 `extension-sdk`；采用 Electron Builder / Forge 产出 macOS、Windows、Linux 安装包。签名、公证、自动更新和崩溃报告必须独立配置，开发模式不可直接复用生产权限。
 
@@ -549,7 +566,7 @@ v1 合并门槛：
 
 ## 19. v1 实现状态
 
-截至 2026-08-27，仓库已实现可运行的 v1 基线：
+截至 2026-08-28，仓库已实现可运行的 v1 基线：
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
@@ -557,8 +574,11 @@ v1 合并门槛：
 | EventLog / BlobStore | 已实现 | SQLite WAL、追加式事件、稳定 ID、SHA-256 与大内容外置 |
 | WorkingSet / context tools | 已实现 | 状态、检索、展开、归档、固定/取消固定；中文 unigram/bigram 检索无需训练 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
-| 桌面 GUI | 已实现开发基线 | Electron + React，包含会话、聊天、上下文检查、模型设置和扩展配置页 |
+| 工作区代码工具 | 已实现 | 安全读取/检索、SHA-256 版本锁写入与精确替换；敏感文件、二进制、路径逃逸、删除与执行均拒绝 |
+| 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
 | 扩展生态 | 已实现发现与校验 | 校验 Z-Agent manifest、integrity 与 MCP 配置；扩展进程执行和 marketplace 安装留待 v1.2 |
-| 测试 | 已实现 | 单元、集成、功能 API、前端组件、类型检查与生产构建 |
+| 测试 | 已实现 | 102 个 Python 单元/集成/功能测试，6 个前端交互/Markdown 测试，类型检查、生产构建与 Electron DMG 开发产物 |
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key；自动执行第三方扩展在权限 broker 和隔离 host 完成前保持关闭。
+
+当前 DMG 尚未内置可重定位 Python Core runtime，也未配置平台签名、公证和正式应用图标，因此不能视为面向干净机器的发布包；这些属于 v1.1 发布工程，不影响仓库内 Conda 环境和 Electron 开发模式运行。

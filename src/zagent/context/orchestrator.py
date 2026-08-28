@@ -38,6 +38,11 @@ class ContextOrchestrator:
         values = arguments.model_dump()
         if tool_name == "context_status":
             working_set = self._working_sets.build(session_id)
+            working_set_data = working_set.to_dict()
+            # Public context-tool/API contract uses `tokens`; the internal domain
+            # model calls the same value `token_estimate`.  Keep the transport name
+            # stable for the Electron inspector and model-facing context tool.
+            working_set_data["tokens"] = working_set_data.pop("token_estimate")
             warning = None
             if working_set.dropped_pinned_ids:
                 warning = (
@@ -52,7 +57,7 @@ class ContextOrchestrator:
                 )
             return {
                 "stats": self._store.session_stats(session_id),
-                "working_set": working_set.to_dict(),
+                "working_set": working_set_data,
                 "latest_archive": self._store.latest_archive(session_id),
                 "warning": warning,
                 "pinned_tokens": working_set.pinned_tokens,

@@ -158,6 +158,13 @@ class AgentRuntime:
     def _finalize(
         self, session_id: str, parent_event_id: str, response: ModelResponse, state: _RoundState
     ) -> AgentResult:
+        if response.reasoning_content:
+            # Final-round reasoning is stored separately for an explicitly
+            # user-expandable audit view. It is excluded from future WorkingSets.
+            self._store.append_event(
+                session_id, "assistant_reasoning", "assistant", response.reasoning_content,
+                parent_event_id=parent_event_id, provenance="model-reasoning",
+            )
         final_event = self._store.append_event(
             session_id, "message", "assistant", response.content,
             parent_event_id=parent_event_id, provenance="model",
@@ -185,7 +192,7 @@ class AgentRuntime:
         }
         if response.reasoning_content is not None:
             # DeepSeek thinking-mode tool calls require this field verbatim on
-            # the next request.  It remains internal to the model conversation.
+            # the next request. The UI exposes it only in a default-collapsed disclosure.
             call_payload["reasoning_content"] = response.reasoning_content
         self._store.append_event(
             session_id, "assistant_tool_calls", "assistant", call_payload,

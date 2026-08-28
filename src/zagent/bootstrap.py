@@ -57,7 +57,7 @@ class ApplicationContainer:
         )
 
     def _workspace_path_for(self, session_id: str) -> str:
-        """Security boundary: filesystem tools only reach the session's workspace root."""
+        """Security boundary: file tools only reach the session's workspace root."""
         session = self.store.get_session(session_id)
         workspace_id = session.get("workspace_id")
         if not workspace_id:
@@ -130,4 +130,3 @@ class ApplicationContainer:
     def close(self) -> None:
         self._close_provider()
         self.store.close()
-

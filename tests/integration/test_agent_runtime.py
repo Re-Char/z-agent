@@ -67,6 +67,26 @@ def test_agent_preserves_reasoning_content_across_tool_round(store, session_id, 
     assert tool_message["tool_calls"][0]["id"] == "call_1"
 
 
+def test_agent_stores_final_reasoning_for_ui_but_excludes_it_from_working_set(
+    store, session_id, context
+):
+    reasoning = "先比较两种方案，再给出结论"
+    runtime = AgentRuntime(
+        store,
+        context,
+        SequenceProvider([ModelResponse(content="采用方案 A", reasoning_content=reasoning)]),
+        ContextToolExecutor(context),
+    )
+
+    result = runtime.send(session_id, "选择方案")
+
+    events = store.list_events(session_id)
+    reasoning_event = next(event for event in events if event.kind == "assistant_reasoning")
+    assert reasoning_event.payload == reasoning
+    assert reasoning_event.event_id not in result.working_set.included_event_ids
+    assert all(message.get("content") != reasoning for message in result.working_set.messages)
+
+
 def test_agent_aggregates_token_stats(store, session_id, context):
     provider = SequenceProvider([
         ModelResponse(content="", tool_calls=[ToolCall("call_1", "context_status", {})], usage={
