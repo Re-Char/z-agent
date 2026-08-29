@@ -261,6 +261,84 @@ class SqliteStore:
             raise NotFoundError("session not found")
         return int(row["context_version"])
 
+    @_serialized
+    def claim_tool_invocation(
+        self, session_id: str, call_id: str, tool_name: str, arguments: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Claim a durable tool invocation or return a safe replay/block decision."""
+        self.get_session(session_id)
+        canonical = json.dumps(
+            arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        arguments_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+        with self._db:
+            cursor = self._db.execute(
+                """INSERT OR IGNORE INTO tool_invocations(
+                       session_id,call_id,tool_name,arguments_sha256,status,
+                       result_event_id,created_at,completed_at
+                   ) VALUES(?,?,?,?, 'running', NULL, ?, NULL)""",
+                (session_id, call_id, tool_name, arguments_sha256, self._now()),
+            )
+            row = self._db.execute(
+                "SELECT * FROM tool_invocations WHERE session_id=? AND call_id=?",
+                (session_id, call_id),
+            ).fetchone()
+        if cursor.rowcount == 1:
+            return {"action": "execute", "arguments_sha256": arguments_sha256}
+        if row["tool_name"] != tool_name or row["arguments_sha256"] != arguments_sha256:
+            return {
+                "action": "conflict",
+                "arguments_sha256": arguments_sha256,
+                "original_tool": row["tool_name"],
+            }
+        if row["status"] != "completed" or not row["result_event_id"]:
+            return {"action": "uncertain", "arguments_sha256": arguments_sha256}
+        original = self.get_event(row["result_event_id"])
+        return {
+            "action": "replay",
+            "arguments_sha256": arguments_sha256,
+            "result_event_id": original.event_id,
+            "result": original.payload,
+        }
+
+    @_serialized
+    def complete_tool_invocation(
+        self,
+        session_id: str,
+        call_id: str,
+        tool_name: str,
+        result: Any,
+    ) -> EventRecord:
+        """Atomically persist a tool result and mark its invocation completed."""
+        with self._db:
+            row = self._db.execute(
+                "SELECT * FROM tool_invocations WHERE session_id=? AND call_id=?",
+                (session_id, call_id),
+            ).fetchone()
+            if row is None:
+                raise ValidationError("tool invocation was not claimed")
+            if row["tool_name"] != tool_name:
+                raise ValidationError("tool invocation name changed")
+            if row["status"] == "completed" and row["result_event_id"]:
+                return self.get_event(row["result_event_id"])
+            result_event = self._insert_event(
+                session_id,
+                "tool_result",
+                "tool",
+                result,
+                tool_name=tool_name,
+                tool_call_id=call_id,
+                provenance="local-tool-runtime",
+            )
+            self._db.execute(
+                """UPDATE tool_invocations
+                   SET status='completed', result_event_id=?, completed_at=?
+                   WHERE session_id=? AND call_id=? AND status='running'""",
+                (result_event.event_id, self._now(), session_id, call_id),
+            )
+            self._bump_context_version(session_id)
+        return result_event
+
     def _store_payload(self, serialized: str) -> tuple[Optional[str], Optional[str]]:
         if len(serialized.encode("utf-8")) <= self._blob_threshold:
             return serialized, None
@@ -544,6 +622,13 @@ class SqliteStore:
                     created_at,
                 ),
             )
+            # A newer pause state supersedes every older unresolved checkpoint.
+            # This keeps continuation injection single-valued across repeated limits.
+            self._db.execute(
+                """UPDATE checkpoints SET resolved_at=?, resolution_event_id=?
+                   WHERE session_id=? AND checkpoint_id!=? AND resolved_at IS NULL""",
+                (created_at, checkpoint_event.event_id, session_id, checkpoint_id),
+            )
             self._bump_context_version(session_id)
         return {
             "checkpoint_id": checkpoint_id,
@@ -579,14 +664,13 @@ class SqliteStore:
         resolution = self.get_event(resolution_event_id)
         if resolution.session_id != session_id:
             raise ValidationError("checkpoint resolution belongs to another session")
-        active = self.latest_checkpoint(session_id, active_only=True)
-        if active is None:
+        if self.latest_checkpoint(session_id, active_only=True) is None:
             return None
         with self._lock, self._db:
             self._db.execute(
                 """UPDATE checkpoints SET resolved_at=?, resolution_event_id=?
-                   WHERE checkpoint_id=? AND resolved_at IS NULL""",
-                (self._now(), resolution_event_id, active["checkpoint_id"]),
+                   WHERE session_id=? AND resolved_at IS NULL""",
+                (self._now(), resolution_event_id, session_id),
             )
             self._bump_context_version(session_id)
         return self.latest_checkpoint(session_id)

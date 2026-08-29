@@ -74,6 +74,53 @@ def test_shared_connection_serializes_parallel_renderer_reads(store, session_id)
         assert sorted(pool.map(read_repeatedly, range(12))) == list(range(12))
 
 
+def test_tool_invocation_claim_replays_and_blocks_conflicts(store, session_id):
+    first = store.claim_tool_invocation(session_id, "call_1", "fs_write", {"path": "a.py"})
+    assert first["action"] == "execute"
+    result_event = store.complete_tool_invocation(
+        session_id, "call_1", "fs_write", {"ok": True, "sha256": "a" * 64}
+    )
+
+    replay = store.claim_tool_invocation(session_id, "call_1", "fs_write", {"path": "a.py"})
+    assert replay["action"] == "replay"
+    assert replay["result_event_id"] == result_event.event_id
+    assert replay["result"]["sha256"] == "a" * 64
+
+    conflict = store.claim_tool_invocation(session_id, "call_1", "fs_write", {"path": "b.py"})
+    assert conflict["action"] == "conflict"
+
+    running = store.claim_tool_invocation(session_id, "call_crashed", "fs_write", {"path": "c.py"})
+    assert running["action"] == "execute"
+    uncertain = store.claim_tool_invocation(
+        session_id, "call_crashed", "fs_write", {"path": "c.py"}
+    )
+    assert uncertain["action"] == "uncertain"
+
+
+def test_tool_invocation_claim_is_unique_across_store_instances(tmp_path):
+    from zagent.storage.sqlite_store import SqliteStore
+
+    data_dir = tmp_path / "data"
+    first = SqliteStore(str(data_dir))
+    second = SqliteStore(str(data_dir))
+    try:
+        session_id = first.create_session("跨实例 invocation")["session_id"]
+        barrier = Barrier(2)
+
+        def claim(store):
+            barrier.wait()
+            return store.claim_tool_invocation(
+                session_id, "shared_call", "fs_write", {"path": "shared.py"}
+            )["action"]
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            actions = sorted(pool.map(claim, [first, second]))
+        assert actions == ["execute", "uncertain"]
+    finally:
+        first.close()
+        second.close()
+
+
 def test_large_payload_round_trips_through_blob(store, session_id):
     payload = "中文大输出" * 100
     event = store.append_event(session_id, "tool_result", "tool", payload)

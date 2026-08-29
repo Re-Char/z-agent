@@ -130,9 +130,17 @@
 - Python Core 版本元数据与 Electron 统一为 `0.1.1`，API/health 从单一 `__version__` 读取。
 - 真实 Electron 启动烟测暴露并修复共享 SQLite connection 的并发读取竞态：events/context 同时请求不再出现 `InterfaceError` 或错误空态。
 
+### 17. v2 工具 invocation 幂等保护
+
+- 新增 `tool_invocations` 持久表，记录 `session_id + call_id + tool_name + arguments_sha256 + status + result_event_id`。
+- 首次 claim 才能执行本地工具；已完成的相同调用会追加带原始 result event ID 的 replay 工具回复，不再执行工具。
+- 重用 call ID 但改变工具/参数时返回 conflict；调用已 claim 但未持久结果时返回 uncertain，要求先读当前文件再用新 call ID。
+- 工具 result event 与 invocation completed 在同一 SQLite 事务落库；覆盖 replay、参数冲突和崩溃窗口三类回归。
+- 新 checkpoint 会 supersede 同 session 的旧未解决 checkpoint；故障注入测试连续 3 次暂停后完成，旧恢复点不会重新浮现。
+
 ## 验证状态
 
-- Python：**125 个测试通过**，覆盖率 **约 85%**（门槛 80%），Ruff 全绿
+- Python：**131 个测试通过**，覆盖率 **85.50%**（门槛 80%），Ruff 全绿
 - 前端：**10 个 Vitest 测试** + strict typecheck + Vite production build 全绿
 - E2E（真实 DeepSeek）：从空工作区创建项目 → 外部测试反馈修复 → 归档/固定 → 二阶段扩展 → 44/44 项目测试与安装级验证
 - 详细验证记录：`docs/verification-report.md`（12 轮迭代逐项记录）

@@ -579,12 +579,12 @@ v1 合并门槛：
 | 自研 Agent loop | 已实现 | 自行完成输出解析、本地工具调度、轮次/截止时间终止和错误映射，不依赖 Agent SDK |
 | EventLog / BlobStore | 已实现 | SQLite WAL、追加式事件、稳定 ID、SHA-256 与大内容外置 |
 | WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 BM25 + 稀疏 TF-IDF 向量融合无需训练 |
-| v2 checkpoint / DB cache version | 已实现首个切片 | SQLite 持久 `context_version`；轮次/时间上限写入可寻址 checkpoint；GUI 可续跑并记录 resolution event；幂等 invocation 与 Runner 仍待完成 |
+| v2 checkpoint / DB cache version | 已实现首个切片 | SQLite 持久 `context_version`；轮次/时间上限写入可寻址 checkpoint；GUI 可续跑并记录 resolution event；工具 invocation 按 call ID/参数 SHA 幂等回放；Runner 仍待完成 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
 | 工作区代码工具 | 已实现 | 安全读取/检索/创建目录、SHA-256 版本锁写入与精确替换；敏感文件、`.git`、依赖/缓存目录、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
 | 扩展生态 | 已实现发现与校验 | 校验 Z-Agent manifest、integrity 与 MCP 配置；扩展进程执行和 marketplace 安装留待 v2 |
-| 测试 | 已实现 | 125 个 Python 单元/集成/功能测试，10 个前端交互/Markdown 测试，约 85% 核心覆盖率、Ruff、类型检查、生产构建、Electron 窗口烟测与 DMG 开发产物 |
+| 测试 | 已实现 | 131 个 Python 单元/集成/功能测试，10 个前端交互/Markdown 测试，85.50% 核心覆盖率、Ruff、类型检查、生产构建、Electron 窗口烟测与 DMG 开发产物 |
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key；自动执行第三方扩展在权限 broker 和隔离 host 完成前保持关闭。
 

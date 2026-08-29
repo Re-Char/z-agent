@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session_created
     ON checkpoints(session_id, created_at);
+CREATE TABLE IF NOT EXISTS tool_invocations (
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    call_id TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    arguments_sha256 TEXT NOT NULL,
+    status TEXT NOT NULL,
+    result_event_id TEXT REFERENCES events(event_id),
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    PRIMARY KEY(session_id, call_id)
+);
 """
 
 # Best-effort migrations for databases created before the v2 schema.

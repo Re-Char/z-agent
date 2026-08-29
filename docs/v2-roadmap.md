@@ -8,7 +8,9 @@
 - ✅ 同一 Core 内的 FastAPI 并发请求通过 Store `RLock` 串行化共享 SQLite connection，修复 Electron 首屏同时请求 events/context 时的 `sqlite3.InterfaceError`；已加 12 线程压测。
 - ✅ 工具轮次/时间达上限时，Runtime 会原子写入结构化 checkpoint：目标事件、已执行工具的证据 event ID、待办工具、文件 SHA、失败原因与 archive ID。
 - ✅ GUI 能在重启后显示未解决 checkpoint，提供“继续任务”；成功续跑后记录 resolution event 并停止注入旧 checkpoint。
-- ⏳ 尚未完成：幂等 invocation 去重、受控 Runner、3 次 checkpoint 的真实长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。因此 P0 总验收仍未标记完成。
+- ✅ 工具 invocation 以 `(session_id, call_id)` 持久化，工具名与规范化参数 SHA-256 参与判定；已完成的调用只回放原结果，参数冲突或“副作用后、结果落库前”崩溃状态会阻断自动重试。
+- ✅ 确定性故障注入已在同一 session 连续产生 3 个 checkpoint 并最终完成；新 checkpoint 会以自己的 event ID supersede 旧暂停点，不会在完成后重新浮现。
+- ⏳ 尚未完成：受控 Runner、真实 provider 下的 3 次 checkpoint 长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。因此 P0 总验收仍未标记完成。
 
 ## 1. P0：长任务可靠性与证据化验收
 

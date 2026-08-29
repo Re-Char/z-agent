@@ -14,6 +14,17 @@ class SequenceProvider:
         return next(self.responses)
 
 
+class CountingToolExecutor:
+    schemas = []
+
+    def __init__(self):
+        self.calls = []
+
+    def execute(self, _session_id, name, arguments):
+        self.calls.append((name, arguments))
+        return {"ok": True, "path": arguments.get("path", ""), "sha256": "b" * 64}
+
+
 def test_agent_executes_context_tool_then_finishes(store, session_id, context):
     provider = SequenceProvider([
         ModelResponse(content="", tool_calls=[ToolCall("call_1", "context_status", {})], raw={"id": "raw-1"}),
@@ -96,6 +107,106 @@ def test_agent_checkpoint_file_versions_are_evidence_backed(store, session_id, c
     assert version["path"] == "src/main.py"
     assert version["sha256"] == "a" * 64
     assert store.get_event(version["evidence_event_id"]).tool_name == "fs_write"
+
+
+def test_agent_replays_completed_invocation_without_reexecuting_tool(store, session_id, context):
+    tools = CountingToolExecutor()
+    provider = SequenceProvider([
+        ModelResponse(content="", tool_calls=[ToolCall("same_call", "fs_write", {"path": "a.py"})]),
+        ModelResponse(content="", tool_calls=[ToolCall("same_call", "fs_write", {"path": "a.py"})]),
+        ModelResponse(content="完成"),
+    ])
+    runtime = AgentRuntime(store, context, provider, tools)
+
+    result = runtime.send(session_id, "写文件")
+
+    assert result.final_event.payload == "完成"
+    assert tools.calls == [("fs_write", {"path": "a.py"})]
+    tool_results = [event for event in store.list_events(session_id) if event.kind == "tool_result"]
+    assert len(tool_results) == 2
+    assert tool_results[1].payload["replayed"] is True
+    assert tool_results[1].payload["original_result_event_id"] == tool_results[0].event_id
+
+
+def test_agent_blocks_reused_call_id_with_changed_arguments(store, session_id, context):
+    tools = CountingToolExecutor()
+    provider = SequenceProvider([
+        ModelResponse(content="", tool_calls=[ToolCall("same_call", "fs_write", {"path": "a.py"})]),
+        ModelResponse(content="", tool_calls=[ToolCall("same_call", "fs_write", {"path": "b.py"})]),
+        ModelResponse(content="已处理冲突"),
+    ])
+    runtime = AgentRuntime(store, context, provider, tools)
+
+    runtime.send(session_id, "写文件")
+
+    assert tools.calls == [("fs_write", {"path": "a.py"})]
+    tool_results = [event for event in store.list_events(session_id) if event.kind == "tool_result"]
+    assert tool_results[1].payload["invocation_state"] == "conflict"
+    assert tool_results[1].payload["ok"] is False
+
+
+def test_agent_blocks_uncertain_invocation_after_crash_window(store, session_id, context):
+    store.claim_tool_invocation(session_id, "crashed_call", "fs_write", {"path": "a.py"})
+    tools = CountingToolExecutor()
+    provider = SequenceProvider([
+        ModelResponse(
+            content="", tool_calls=[ToolCall("crashed_call", "fs_write", {"path": "a.py"})]
+        ),
+        ModelResponse(content="已先检查状态"),
+    ])
+    runtime = AgentRuntime(store, context, provider, tools)
+
+    runtime.send(session_id, "继续崩溃前任务")
+
+    assert tools.calls == []
+    tool_result = next(event for event in store.list_events(session_id) if event.kind == "tool_result")
+    assert tool_result.payload["invocation_state"] == "uncertain"
+    assert "阻止自动重试" in tool_result.payload["error"]
+
+
+def test_three_checkpoint_chain_supersedes_old_state_and_finishes(store, session_id, context):
+    import pytest
+
+    tools = CountingToolExecutor()
+    checkpoints = []
+    previous_checkpoint_id = None
+    for cycle in range(3):
+        provider = SequenceProvider([
+            ModelResponse(
+                content="",
+                tool_calls=[ToolCall(f"run_{cycle}", "fs_write", {"path": f"{cycle}.py"})],
+            ),
+            ModelResponse(
+                content="",
+                tool_calls=[ToolCall(f"pending_{cycle}", "fs_read", {"path": f"{cycle}.py"})],
+            ),
+        ])
+        runtime = AgentRuntime(
+            store,
+            context,
+            provider,
+            tools,
+            AgentRuntimeLimits(max_tool_rounds=1, task_timeout_seconds=10),
+        )
+        with pytest.raises(AgentLimitError) as caught:
+            runtime.send(session_id, "开始长任务" if cycle == 0 else "继续任务")
+        checkpoint = caught.value.checkpoint
+        checkpoints.append(checkpoint)
+        assert store.latest_checkpoint(session_id, active_only=True)["checkpoint_id"] == checkpoint[
+            "checkpoint_id"
+        ]
+        if previous_checkpoint_id:
+            assert previous_checkpoint_id in provider.messages[0][0]["content"]
+        previous_checkpoint_id = checkpoint["checkpoint_id"]
+
+    finisher_provider = SequenceProvider([ModelResponse(content="长任务已完成")])
+    finisher = AgentRuntime(store, context, finisher_provider, tools)
+    result = finisher.send(session_id, "继续并完成任务")
+
+    assert result.final_event.payload == "长任务已完成"
+    assert checkpoints[-1]["checkpoint_id"] in finisher_provider.messages[0][0]["content"]
+    assert store.latest_checkpoint(session_id, active_only=True) is None
+    assert len(tools.calls) == 3
 
 
 def test_agent_preserves_reasoning_content_across_tool_round(store, session_id, context):

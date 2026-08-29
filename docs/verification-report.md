@@ -373,6 +373,13 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - SQLite 可靠性：`context_version` 持久化；旧库迁移、重启保留、双 Store 可见和工作区缓存失效通过。
 - Electron 真实启动首次暴露 events/context 并发读取共享 SQLite connection 的 `InterfaceError`；Store 所有公开 DB 操作改为 `RLock` 串行化，12 线程压测与重启 Electron 复验通过，旧会话事件和 Context Inspector 同时正常加载。
 - Checkpoint：轮次/时间超限会写入结构状态与证据 event ID；API/SSE 暴露可恢复元数据；GUI 一键续跑，成功后以 resolution event 解决 checkpoint。
-- 自动化：125 个 Python 测试通过，分支覆盖率约 85%（门槛 80%），Ruff 通过；10 个 Vitest、TypeScript strict typecheck 与 Vite production build 通过。
+- 自动化：131 个 Python 测试通过，分支覆盖率 85.50%（门槛 80%），Ruff 通过；10 个 Vitest、TypeScript strict typecheck 与 Vite production build 通过。
 
-未标记完成的 P0：幂等 invocation 去重、受控测试 Runner、三次 checkpoint 真实长任务故障注入、模型/工具 schema 版本缓存键。
+
+### 17.1 工具 invocation 幂等故障注入
+
+- 相同 call ID、工具和参数第二次出现时，Executor 计数仍为 1，新 tool result 引用原始 result event ID。
+- 相同 call ID 改参数时返回 `conflict`，不调用 Executor；预先留下 `running` invocation 模拟副作用后崩溃，续跑返回 `uncertain` 且不重试。
+- invocation claim 和 result 事务在 SQLite 持久，结果 event 与 completed 状态原子提交。
+- 同一 session 的确定性故障注入连续生成 3 个 checkpoint，前两个分别由新 checkpoint event supersede，最终回复解决最后一个，完成后 active checkpoint 为空。
+- 全仓回归更新为 131 个 Python 测试；受控 Runner、真实 provider 三次 checkpoint 长任务和模型/工具 schema 缓存键仍未标记完成。

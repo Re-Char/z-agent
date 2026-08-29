@@ -216,20 +216,32 @@ class AgentRuntime:
             parent_event_id=parent_event_id, provenance="model",
         )
         for call in response.tool_calls:
-            try:
-                result = self._tools.execute(session_id, call.name, call.arguments)
-            except Exception as exc:
-                result = {"ok": False, "error": str(exc), "tool": call.name}
-            result_event = self._store.append_event(
-                session_id, "tool_result", "tool", result,
-                tool_name=call.name, tool_call_id=call.call_id,
-                provenance="local-tool-runtime",
+            claim = self._store.claim_tool_invocation(
+                session_id, call.call_id, call.name, call.arguments
             )
+            replayed = False
+            if claim["action"] == "execute":
+                try:
+                    result = self._tools.execute(session_id, call.name, call.arguments)
+                except Exception as exc:
+                    result = {"ok": False, "error": str(exc), "tool": call.name}
+                result_event = self._store.complete_tool_invocation(
+                    session_id, call.call_id, call.name, result
+                )
+            else:
+                replayed = claim["action"] == "replay"
+                result = self._nonexecuted_invocation_result(call.name, claim)
+                result_event = self._store.append_event(
+                    session_id, "tool_result", "tool", result,
+                    tool_name=call.name, tool_call_id=call.call_id,
+                    provenance="tool-invocation-guard",
+                )
             evidence: Dict[str, Any] = {
                 "call_id": call.call_id,
                 "tool": call.name,
                 "tool_result_event_id": result_event.event_id,
                 "ok": not isinstance(result, dict) or result.get("ok") is not False,
+                "replayed": replayed,
             }
             if isinstance(result, dict):
                 if isinstance(result.get("path"), str):
@@ -239,6 +251,39 @@ class AgentRuntime:
                 if result.get("error"):
                     evidence["error"] = str(result["error"])[:300]
             state.tool_evidence.append(evidence)
+
+    @staticmethod
+    def _nonexecuted_invocation_result(tool_name: str, claim: Dict[str, Any]) -> Dict[str, Any]:
+        action = claim["action"]
+        if action == "replay":
+            original = claim["result"]
+            original_ok = not isinstance(original, dict) or original.get("ok") is not False
+            return {
+                "ok": original_ok,
+                "replayed": True,
+                "tool": tool_name,
+                "original_result_event_id": claim["result_event_id"],
+                "result": original,
+            }
+        if action == "conflict":
+            return {
+                "ok": False,
+                "tool": tool_name,
+                "error": (
+                    "工具 call_id 已被不同工具或参数使用，为防止重复副作用已拒绝执行；"
+                    "请使用新 call_id。"
+                ),
+                "invocation_state": "conflict",
+            }
+        return {
+            "ok": False,
+            "tool": tool_name,
+            "error": (
+                "上次工具调用可能已产生副作用，但未来得及持久化结果；已阻止自动重试，"
+                "请先读取当前文件状态后用新 call_id 继续。"
+            ),
+            "invocation_state": "uncertain",
+        }
 
     def _create_checkpoint(
         self,

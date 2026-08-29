@@ -192,7 +192,9 @@ class WorkingSetBuilder:
                 continue
             completed.append({
                 key: item[key]
-                for key in ("call_id", "tool", "tool_result_event_id", "ok", "path", "sha256")
+                for key in (
+                    "call_id", "tool", "tool_result_event_id", "ok", "replayed", "path", "sha256"
+                )
                 if key in item
             })
         pending = []
