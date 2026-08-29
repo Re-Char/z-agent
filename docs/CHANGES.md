@@ -1,7 +1,7 @@
 # Z-Agent 改动概览（for Codex）
 
 > 面向后续接手者的快速导航。基线：`eda4ff1`（"merge remote repository initialization"）。
-> 本分支相对基线包含 9 轮迭代，覆盖后端核心、前端交互、上下文管理和工作区安全四块。
+> 本分支相对基线包含 12 轮迭代，覆盖后端核心、前端交互、上下文管理、工作区安全和真实长任务验收。
 
 ## 一分钟速览
 
@@ -97,12 +97,30 @@
 - 向量通道只读取最近 1000 个非敏感事件；内部响应和 Thinking 不参与向量化，FTS5 保持全历史回退
 - 数据库持久化向量索引、稠密多语 embedding 和长期记忆明确进入 `docs/v2-roadmap.md`
 
+### 12. 空工作区项目创建与路径防护
+- 新增 `fs_mkdir`，允许 Agent 在工作区内递归创建项目目录，从空目录构建标准 `src/`、`tests/` 结构
+- `.git`、依赖目录、缓存和构建产物不仅从列表/搜索隐藏，直接路径读取和写入也会被核心拒绝
+- `fs_mkdir` 复用工作区 resolve 与符号链接边界，不能创建工作区外或敏感目录
+
+### 13. DeepSeek 工具参数协议修复
+- 若 provider 在工具执行前发现 `tool_calls[].function.arguments` 不是合法 JSON，追加严格修复指令并只重试一次
+- 第二次仍非法立即返回协议错误；任何未经 JSON 解析和工具 schema 校验的参数都不会执行
+- 流式路径遇到非法参数时停止本轮并走同一受限修复，不再把原始文本包装成 `_raw` 交给工具
+- 新增非流式修复、二次失败终止和流式修复三类单元测试
+
+### 14. v1 验收与真实长任务
+- 新增 `scripts/long_task_e2e.py`，使用现有 SecretStore 中的真实 provider 配置运行 build/audit/extend/finalize 多阶段任务，不读取或输出密钥
+- 真实 DeepSeek 从空目录创建 `taskboard` 项目；首轮 24/29 通过，经外部失败反馈修复为 33/33，再扩展为 44/44
+- 同一 session 建立两次 archive、完成 pin/unpin，并在归档后继续修改最新代码；最终 135 个事件、无固定事件
+- 隔离 venv editable install、console script、`python -m` 和手工 CLI 流程通过
+- `docs/v1-acceptance.md` 明确已完成边界；`docs/v2-roadmap.md` 收纳 checkpoint、runner、记忆、稠密向量、扩展 host 和生产发布
+
 ## 验证状态
 
-- Python：**114 个测试通过**，覆盖率 **84.57%**（门槛 80%）
+- Python：**119 个测试通过**，覆盖率 **84.79%**（门槛 80%）
 - 前端：**7 个 Vitest 测试** + strict typecheck + Vite production build 全绿
-- E2E（真实 DeepSeek）：读文件 → 流式输出 → 折叠展示 → 归档/固定 → 无 400/500
-- 详细验证记录：`docs/verification-report.md`（9 轮迭代逐项记录）
+- E2E（真实 DeepSeek）：从空工作区创建项目 → 外部测试反馈修复 → 归档/固定 → 二阶段扩展 → 44/44 项目测试与安装级验证
+- 详细验证记录：`docs/verification-report.md`（12 轮迭代逐项记录）
 
 ## 接手注意事项
 

@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import httpx
 
-from zagent.domain.errors import ModelTransportError
+from zagent.domain.errors import ModelProtocolError, ModelTransportError
 from zagent.domain.models import ModelResponse, ToolCall
 
 from .parser import parse_openai_compatible_response
@@ -52,7 +52,29 @@ class OpenAICompatibleProvider:
         return endpoint if endpoint.endswith("/chat/completions") else endpoint + "/chat/completions"
 
     def complete(self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> ModelResponse:
+        return self._complete(messages, tools, allow_protocol_repair=True)
+
+    def _complete(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        *,
+        allow_protocol_repair: bool,
+    ) -> ModelResponse:
         payload = self._payload(messages, tools, stream=False)
+        raw = self._request_json(payload)
+        try:
+            return parse_openai_compatible_response(raw)
+        except ModelProtocolError:
+            if not allow_protocol_repair:
+                raise
+            return self._complete(
+                self._protocol_repair_messages(messages),
+                tools,
+                allow_protocol_repair=False,
+            )
+
+    def _request_json(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._client.post(self._endpoint, headers=self._headers, json=payload)
@@ -74,7 +96,7 @@ class OpenAICompatibleProvider:
                 raise ModelTransportError(f"model request failed: {exc}") from exc
             except ValueError as exc:
                 raise ModelTransportError(f"model request failed: {exc}") from exc
-        return parse_openai_compatible_response(raw)
+        return raw
 
     def complete_stream(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
@@ -102,7 +124,21 @@ class OpenAICompatibleProvider:
                             "message": f"model request failed ({response.status_code}): {detail}",
                         }
                         return
-                    yield from self._iter_sse(response)
+                    for event in self._iter_sse(response):
+                        if event["type"] != "protocol_error":
+                            yield event
+                            continue
+                        try:
+                            repaired = self._complete(
+                                self._protocol_repair_messages(messages),
+                                tools,
+                                allow_protocol_repair=False,
+                            )
+                        except (ModelProtocolError, ModelTransportError) as exc:
+                            yield {"type": "error", "message": str(exc)}
+                            return
+                        yield {"type": "done", "response": repaired}
+                        return
                     return
             except httpx.HTTPError as exc:
                 if attempt < self._max_retries:
@@ -180,7 +216,11 @@ class OpenAICompatibleProvider:
             try:
                 parsed_arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                parsed_arguments = {"_raw": arguments}
+                yield {
+                    "type": "protocol_error",
+                    "message": "streamed tool arguments are not valid JSON",
+                }
+                return
             tool_calls.append(ToolCall(
                 call_id=slot["call_id"] or f"call_{index}",
                 name=slot["name"],
@@ -205,6 +245,21 @@ class OpenAICompatibleProvider:
             "name": slot["name"],
             "arguments_delta": slot["arguments"],
         }
+
+    @staticmethod
+    def _protocol_repair_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        instruction = (
+            "\n\n协议修复重试：上一次响应未通过本地 JSON 校验，且任何工具都尚未执行。"
+            "请基于相同上下文重新生成当前步骤；若调用工具，function.arguments 必须是严格、"
+            "完整的 JSON object，正确转义换行和引号，不得加入 Markdown、注释或截断内容。"
+            "不要继续到工具执行后的步骤。"
+        )
+        repaired = [dict(message) for message in messages]
+        if repaired and repaired[0].get("role") == "system":
+            repaired[0]["content"] = str(repaired[0].get("content") or "") + instruction
+        else:
+            repaired.insert(0, {"role": "system", "content": instruction.strip()})
+        return repaired
 
     @staticmethod
     def _error_detail(response: httpx.Response) -> str:

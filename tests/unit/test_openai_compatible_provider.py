@@ -173,3 +173,85 @@ def test_provider_retries_transient_status_but_not_bad_request():
         provider.complete([], [])
     assert bad_attempts == 1
     client.close()
+
+
+def test_provider_repairs_invalid_tool_json_once():
+    import json
+
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        body = json.loads(request.content)
+        if attempts == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [{
+                "id": "bad", "function": {
+                    "name": "context_archive", "arguments": '{"reason":"unterminated}',
+                },
+            }]}}]})
+        assert "协议修复重试" in body["messages"][0]["content"]
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [{
+            "id": "fixed", "function": {
+                "name": "context_status", "arguments": "{}",
+            },
+        }]}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="m", client=client)
+    response = provider.complete([{"role": "system", "content": "base"}], [])
+    assert attempts == 2
+    assert response.tool_calls[0].name == "context_status"
+    client.close()
+
+
+def test_provider_stops_after_one_protocol_repair():
+    attempts = 0
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(200, json={"choices": [{"message": {"tool_calls": [{
+            "function": {"name": "context_search", "arguments": "not-json"},
+        }]}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="m", client=client)
+    from zagent.domain.errors import ModelProtocolError
+    with pytest.raises(ModelProtocolError):
+        provider.complete([{"role": "user", "content": "search"}], [])
+    assert attempts == 2
+    client.close()
+
+
+def test_stream_repairs_invalid_tool_json_without_executing_raw_arguments():
+    import json
+
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        body = json.loads(request.content)
+        if body["stream"]:
+            chunks = [
+                {"choices": [{"delta": {"tool_calls": [{
+                    "index": 0, "id": "bad", "function": {
+                        "name": "fs_write", "arguments": '{"path":"a.py"',
+                    },
+                }]}}]},
+                "[DONE]",
+            ]
+            payload = "\n".join(f"data: {json.dumps(chunk)}" for chunk in chunks)
+            return httpx.Response(200, text=payload + "\n")
+        assert "协议修复重试" in body["messages"][0]["content"]
+        return httpx.Response(200, json={"choices": [{"message": {"content": "已重新生成"}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(base_url="https://model.example/v1", model="m", client=client)
+    events = list(provider.complete_stream([{"role": "system", "content": "base"}], []))
+    done = next(event for event in events if event["type"] == "done")["response"]
+    assert done.content == "已重新生成"
+    assert attempts == 2
+    assert not any(event["type"] == "error" for event in events)
+    client.close()

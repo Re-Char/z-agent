@@ -154,7 +154,8 @@ class WorkingSetBuilder:
         if workspace_path:
             prompt += (
                 f"\n\n当前工作区（文件安全边界）：{workspace_path}\n"
-                "你有 fs_list / fs_read / fs_search / fs_project_overview / fs_write / fs_replace 工具，"
+                "你有 fs_list / fs_mkdir / fs_read / fs_search / fs_project_overview / "
+                "fs_write / fs_replace 工具，"
                 "只能访问该工作区目录。读取后应使用 fs_read 返回的 sha256 修改最新版本；"
                 "敏感文件、密钥、凭据、二进制文件、工作区外路径会被工具拒绝。"
             )

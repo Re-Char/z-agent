@@ -224,7 +224,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 - **敏感信息：** EventLog 会比摘要保留更多原文。必须在本地写入前检测 API key、token、私钥；BlobStore 加密策略由部署方配置。
 - **磁盘增长：** 记录 payload 大小、按会话配额、提供显式导出/清理；清理必须生成 tombstone event，不能悄然破坏引用。
 - **错误检索：** Prompt 中始终标示 retrieved evidence 为“历史证据”，不当作已验证事实；保留 event ID 供模型复核。
-- **模型不使用管理工具：** 高水位时由 Orchestrator 创建保护性 archive，并提示下一轮；所有 context tool 的调用率必须可观测。
+- **模型不使用管理工具：** 当前由确定性硬预算裁剪保护 provider，并提示模型使用上下文工具；不会凭空生成 archive。v2 只在结构化 checkpoint 完整时考虑自动归档，所有 context tool 调用率必须可观测。
 - **回退：** 每个 session 可关闭主动归档，退回“近期消息 + 确定性预算裁剪”；原始事件始终保留，不依赖外部 compressor。
 
 ## 10. 验收指标
@@ -403,7 +403,7 @@ Core service 是独立可执行进程，GUI 崩溃或重启不应破坏任务和
 `resolve`/父目录校验，符号链接也不能逃逸。v1 只提供有界文本能力：
 
 - 读取、目录概览和关键词检索；二进制、大文件、依赖/构建目录和常见密钥文件受限；
-- 新建文本文件，或用 `fs_read` 返回的 SHA-256 乐观锁更新已有文件；
+- 在工作区内创建目录和文本文件，或用 `fs_read` 返回的 SHA-256 乐观锁更新已有文件；
 - 精确文本替换默认只允许唯一匹配，写入使用同目录临时文件原子替换；
 - 不提供删除、任意命令、shell、提权、网络上传或工作区外访问。
 
@@ -430,7 +430,7 @@ broker，不能复用 v1 文件工具的信任结论。
 
 因此采用 **统一发现，分生态适配，隔离执行** 的方案：
 
-| 生态 | v1 支持方式 | 市场/来源 | 明确边界 |
+| 生态 | 目标支持方式 | 市场/来源 | 明确边界 |
 | --- | --- | --- | --- |
 | MCP | 一等支持，安装为受管 server，stdIO / HTTP transport | 官方 MCP Registry + 自定义 registry | 工具调用经权限 broker；默认不信任 |
 | Z-Agent Extension | 一等支持，manifest + Worker/子进程 host | 自建 registry、文件或 Git 安装 | 只暴露稳定 Extension SDK |
@@ -476,7 +476,7 @@ MCP server 也进入同一许可模型：记录 server 二进制/包哈希、tra
 | B：Code-OSS/Theia workspace 容器 | 在内嵌或独立 IDE workspace 内运行兼容扩展 | 中；需要维护 extension host |
 | C：把任意 VSIX 当 Z-Agent 内核扩展运行 | 直接调用 VS Code API 并改 Agent 行为 | 低；不能作为承诺 |
 
-v1 实施 A + MCP + Z-Agent Extension；需要编辑器生态时实施 B。C 仅针对少量目标扩展做适配器，不提供“任意 VSIX”承诺。
+当前 v1 只实现 manifest/MCP 配置发现和校验，不执行第三方代码。v2 实施 A + 受管 MCP + Z-Agent Extension Host；需要编辑器生态时再实施 B。C 仅针对少量目标扩展做适配器，不提供“任意 VSIX”承诺。
 
 ### 15.4 扩展安全与供应链
 
@@ -490,10 +490,10 @@ v1 实施 A + MCP + Z-Agent Extension；需要编辑器生态时实施 B。C 仅
 
 | 项目 | 可行性 | 前置条件/风险 | 排期 |
 | --- | --- | --- | --- |
-| MCP Registry 搜索、受管安装与调用 | 高 | transport、OAuth 与工具权限治理 | v1 |
-| 自有 extension SDK / registry | 高 | 先冻结最小 SDK，避免 API 漂移 | v1 |
-| npm 私有/公有包分发 | 高 | lockfile、依赖扫描、子进程隔离 | v1.1 |
-| Open VSX 检索和 VSIX 导入 | 高 | 仅是分发/管理，不等价于运行兼容 | v1.1 |
+| MCP Registry 搜索、受管安装与调用 | 高 | transport、OAuth 与工具权限治理 | v2 |
+| 自有 extension SDK / registry | 高 | 先冻结最小 SDK，避免 API 漂移 | v2 |
+| npm 私有/公有包分发 | 高 | lockfile、依赖扫描、子进程隔离 | v2 |
+| Open VSX 检索和 VSIX 导入 | 高 | 仅是分发/管理，不等价于运行兼容 | v2 |
 | Code-OSS / Theia extension host | 中 | 包体积、升级维护、扩展权限 | v2 |
 | 官方 VS Code Marketplace 直接接入 | 不可作为默认方案 | 使用授权与技术兼容性限制 | 不排期 |
 
@@ -502,17 +502,17 @@ v1 实施 A + MCP + Z-Agent Extension；需要编辑器生态时实施 B。C 仅
 ### v1.0：核心与中文基线（本次实现）
 
 1. Phase 0 EventLog / WorkingSet 原型；
-2. Model Gateway 先接一个国产模型和一个 local OpenAI-compatible 模型；
-3. 中文 lexical 混合检索与 30 个 `zh-agent-evals`；
-4. 通过“归档后准确恢复中文工具输出”的端到端测试。
+2. Model Gateway 接入国产 OpenAI-compatible 模型与本地 echo/FakeProvider；
+3. 中文 lexical + 稀疏 TF-IDF 混合检索与单元/功能回归；
+4. 通过“归档后恢复证据”和真实 DeepSeek 多阶段代码任务端到端测试。
 
-### v1.1：可用桌面产品
+### v2.0：生产桌面产品
 
-1. Electron shell、Core service、认证本地 RPC；
-2. Chat、Timeline、Context Inspector、Model Console 与 Permission Center；
+1. 将现有 Electron shell 与 Core service 打为自包含 runtime，补齐迁移恢复和自动更新；
+2. 在现有 Chat、Timeline、Context Inspector、模型设置上补齐证据报告和 Permission Center；
 3. macOS 优先签名打包，Windows/Linux 以 CI artifact 验证。
 
-### v1.2：开放生态
+### v2.1：开放生态
 
 1. MCP registry adapter、受管 MCP server 与审批流；
 2. Z-Agent Extension SDK、manifest、Worker host、项目 lockfile；
@@ -520,7 +520,7 @@ v1 实施 A + MCP + Z-Agent Extension；需要编辑器生态时实施 B。C 仅
 
 **更新后的核心验收指标：**
 
-| 指标 | v1.2 目标 |
+| 指标 | v2 目标 |
 | --- | --- |
 | 中文工具调用成功率 | 在固定 `zh-agent-evals` 中按 provider 分别报告；未达阈值不得标为 `agent_ready` |
 | 归档后中文证据恢复 | 原文、event ID、哈希 100% 一致 |
@@ -578,11 +578,11 @@ v1 合并门槛：
 | EventLog / BlobStore | 已实现 | SQLite WAL、追加式事件、稳定 ID、SHA-256 与大内容外置 |
 | WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 BM25 + 稀疏 TF-IDF 向量融合无需训练 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
-| 工作区代码工具 | 已实现 | 安全读取/检索、SHA-256 版本锁写入与精确替换；敏感文件、二进制、路径逃逸、删除与执行均拒绝 |
+| 工作区代码工具 | 已实现 | 安全读取/检索/创建目录、SHA-256 版本锁写入与精确替换；敏感文件、`.git`、依赖/缓存目录、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
-| 扩展生态 | 已实现发现与校验 | 校验 Z-Agent manifest、integrity 与 MCP 配置；扩展进程执行和 marketplace 安装留待 v1.2 |
-| 测试 | 已实现 | 114 个 Python 单元/集成/功能测试，7 个前端交互/Markdown 测试，类型检查、生产构建与 Electron DMG 开发产物 |
+| 扩展生态 | 已实现发现与校验 | 校验 Z-Agent manifest、integrity 与 MCP 配置；扩展进程执行和 marketplace 安装留待 v2 |
+| 测试 | 已实现 | 119 个 Python 单元/集成/功能测试，7 个前端交互/Markdown 测试，84.79% 核心覆盖率、类型检查、生产构建、Electron 窗口烟测与 DMG 开发产物 |
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key；自动执行第三方扩展在权限 broker 和隔离 host 完成前保持关闭。
 
-当前 DMG 尚未内置可重定位 Python Core runtime，也未配置平台签名、公证和正式应用图标，因此不能视为面向干净机器的发布包；这些属于 v1.1 发布工程，不影响仓库内 Conda 环境和 Electron 开发模式运行。
+当前 DMG 尚未内置可重定位 Python Core runtime，也未配置平台签名、公证和正式应用图标，因此不能视为面向干净机器的发布包；这些属于 v2 发布工程，不影响仓库内 Conda 环境和 Electron 开发模式运行。完整验收边界与真实长任务结果见 [v1-acceptance.md](v1-acceptance.md)。

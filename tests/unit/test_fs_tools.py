@@ -92,7 +92,8 @@ def test_fs_tools_expose_version_checked_write_operations(project):
     executor = make_executor(project)
     names = [schema["function"]["name"] for schema in executor.schemas]
     assert names == [
-        "fs_list", "fs_read", "fs_search", "fs_project_overview", "fs_write", "fs_replace",
+        "fs_list", "fs_mkdir", "fs_read", "fs_search", "fs_project_overview", "fs_write",
+        "fs_replace",
     ]
     assert not any("delete" in name or "execute" in name for name in names)
 
@@ -110,6 +111,26 @@ def test_sensitive_and_binary_files_are_never_exposed(project):
         executor.execute("s1", "fs_read", {"path": "image.bin"})
     searched = executor.execute("s1", "fs_search", {"query": "should-never-leak"})
     assert searched["hits"] == []
+
+
+def test_protected_project_directories_cannot_be_accessed_directly(project):
+    executor = make_executor(project)
+    with pytest.raises(ToolExecutionError, match="敏感文件"):
+        executor.execute("s1", "fs_read", {"path": ".git/config"})
+    with pytest.raises(ToolExecutionError, match="敏感文件"):
+        executor.execute("s1", "fs_read", {"path": "node_modules/big.js"})
+
+
+def test_fs_mkdir_creates_nested_project_structure(project):
+    executor = make_executor(project)
+    created = executor.execute("s1", "fs_mkdir", {"path": "packages/core/tests"})
+    assert created == {"path": "packages/core/tests", "created": True}
+    assert (project / "packages" / "core" / "tests").is_dir()
+    assert executor.execute("s1", "fs_mkdir", {"path": "packages/core/tests"})["created"] is False
+    with pytest.raises(ToolExecutionError, match="敏感文件"):
+        executor.execute("s1", "fs_mkdir", {"path": ".git/hooks"})
+    with pytest.raises(ToolExecutionError, match="同名文件"):
+        executor.execute("s1", "fs_mkdir", {"path": "README.md"})
 
 
 def test_fs_write_requires_latest_sha_for_existing_file(project):

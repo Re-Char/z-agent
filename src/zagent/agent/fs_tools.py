@@ -13,6 +13,7 @@ from zagent.domain.errors import ToolExecutionError
 
 FS_TOOL_DESCRIPTIONS = {
     "fs_list": "列出当前工作区某个目录下的条目（文件名、类型、大小、修改时间），默认项目根目录，不递归",
+    "fs_mkdir": "在当前工作区内创建目录，可递归创建父目录；不能访问工作区外、敏感或受保护目录",
     "fs_read": "读取当前工作区内单个非敏感文本文件的最新内容，并返回 sha256 版本指纹。"
                "max_chars 按字符数截断（中文 1 字符 ≈ 1 token）",
     "fs_search": "在当前工作区内按关键词搜索文件名与文件内容（大小写不敏感）。"
@@ -31,6 +32,10 @@ class StrictFsArgs(BaseModel):
 
 class FsListArgs(StrictFsArgs):
     path: str = Field(default=".", max_length=2000)
+
+
+class FsMkdirArgs(StrictFsArgs):
+    path: str = Field(min_length=1, max_length=2000)
 
 
 class FsReadArgs(StrictFsArgs):
@@ -64,6 +69,7 @@ class FsReplaceArgs(StrictFsArgs):
 
 FS_ARGUMENT_TYPES = {
     "fs_list": FsListArgs,
+    "fs_mkdir": FsMkdirArgs,
     "fs_read": FsReadArgs,
     "fs_search": FsSearchArgs,
     "fs_project_overview": FsOverviewArgs,
@@ -127,6 +133,8 @@ class FileSystemToolExecutor:
             raise ToolExecutionError(f"invalid arguments for {name}: {exc}") from exc
         if name == "fs_list":
             return self._list(session_id, args.path)
+        if name == "fs_mkdir":
+            return self._mkdir(session_id, args.path)
         if name == "fs_read":
             return self._read(session_id, args.path, args.max_chars)
         if name == "fs_search":
@@ -161,7 +169,7 @@ class FileSystemToolExecutor:
     @staticmethod
     def _is_sensitive(relative: Path) -> bool:
         parts = [part.casefold() for part in relative.parts]
-        if any(part in _SENSITIVE_DIRS for part in parts[:-1]):
+        if any(part in _SENSITIVE_DIRS or part in _IGNORED_DIRS for part in parts):
             return True
         if not parts:
             return False
@@ -221,6 +229,21 @@ class FileSystemToolExecutor:
                 "modified": int(stat.st_mtime),
             })
         return {"path": str(target), "entries": entries[:200], "count": len(entries)}
+
+    def _mkdir(self, session_id: str, relative: str) -> Dict[str, Any]:
+        target = self._resolve(session_id, relative)
+        root = Path(self._workspace_path(session_id)).resolve()
+        if target == root:
+            return {"path": relative, "created": False}
+        if target.exists():
+            if not target.is_dir():
+                raise ToolExecutionError(f"同名文件已存在，无法创建目录：{relative}")
+            return {"path": relative, "created": False}
+        try:
+            target.mkdir(parents=True, exist_ok=False)
+        except OSError as exc:
+            raise ToolExecutionError(f"创建目录失败：{exc}") from exc
+        return {"path": relative, "created": True}
 
     def _read(self, session_id: str, relative: str, max_chars: int) -> Dict[str, Any]:
         target = self._resolve(session_id, relative)

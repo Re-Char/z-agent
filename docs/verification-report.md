@@ -337,3 +337,30 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - 性能抽查：临时 SQLite 中 1000 条中文事件的单次混合检索约 38ms（本机开发环境，不作为跨设备 SLA）。
 - 自动化：114 个 Python 测试、7 个 UI 测试、Ruff 和 TypeScript typecheck 全绿；Python 覆盖率 84.57%。
 - v2 边界：数据库级 context version、持久化稠密向量索引和长期记忆见 `docs/v2-roadmap.md`，本轮未提前实现。
+
+## 16. v1 全面验收与真实长任务（第十二轮，2026-08-29）
+
+### 16.1 本轮核心修正
+
+- 新增 `fs_mkdir`，使 Agent 能从空工作区建立多层项目结构；`.git`、依赖、缓存和构建目录的直接读写也统一拒绝。
+- OpenAI-compatible provider 对非法 tool arguments 增加一次性协议修复；二次失败停止，流式与非流式均不执行未验证参数。
+- 文档不再把自动保护性归档、扩展执行或生产安装包标记为 v1 已完成；当前边界见 `v1-acceptance.md`。
+
+### 16.2 自动化与桌面结果
+
+- `npm test`：119 个 Python 测试、7 个 UI 测试、Ruff、TypeScript strict typecheck 全部通过。
+- Python 覆盖率 84.79%；Vite production build 通过，JS 300.68KB（gzip 95.81KB）、CSS 20.26KB（gzip 5.46KB）。
+- Electron 主进程/Preload 语法检查通过；electron-builder 成功生成 arm64 DMG。
+- 真实 Electron 窗口烟测：三栏无横向溢出，用户消息右侧限宽；Thinking 仅显示默认收起披露栏；上下文工作集和事件数正常显示。
+- 开发进程在烟测结束后全部停止。
+
+### 16.3 真实 DeepSeek 长程代码任务
+
+- 临时空工作区：`/private/tmp/zagent-long-e2e.jIkvCr`；同一 session 完成 build/audit/extend/finalize。
+- 产物：标准库 Python `taskboard`，含依赖图、JSON 原子存储、CLI、JSON/CSV export、中文 README 和 44 个测试。
+- 首次外部测试 24/29；将真实失败反馈交回 Agent 后 33/33；扩展后最终 44/44。
+- Agent 搜索并固定原始需求，完成第一阶段归档；最终取消 pin 并完成第二阶段归档。最终 135 个事件、最新 WorkingSet 13,732 tokens。
+- 隔离 venv editable install、console script、`python -m taskboard` 与手工 add/list/next/done/export 流程通过。
+- 暴露限制：首轮达到默认 8 工具轮上限，需要同一 session 续轮；模型最终自述有一次文件名单复数偏差；无受控 runner 时测试仍由外部执行。
+
+完整过程、archive ID 与 v2 改进项见 `docs/v1-acceptance.md`。

@@ -11,7 +11,7 @@ Z-Agent 是一个中文优先、可审计的本地长程智能体。v1 自行实
 - 自研 tool-calling 循环、参数校验、最大轮次、任务超时和错误事件；
 - Electron + React 中文桌面 GUI，包含任务时间线和上下文检查器；
 - Z-Agent extension manifest 与 MCP server 配置发现；扩展代码默认不执行；
-- 单元、集成、API 功能和前端组件测试。
+- 单元、集成、API 功能和前端组件测试；真实 DeepSeek 长程任务验收脚本。
 
 ## 环境
 
@@ -81,7 +81,7 @@ tests/
   functional/
 ```
 
-详细设计见 [docs/architecture.md](docs/architecture.md)。
+详细设计见 [docs/architecture.md](docs/architecture.md)。当前完成边界和真实长任务证据见 [docs/v1-acceptance.md](docs/v1-acceptance.md)，后续工作见 [docs/v2-roadmap.md](docs/v2-roadmap.md)。
 
 ## 安全边界
 
