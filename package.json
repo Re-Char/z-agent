@@ -1,7 +1,7 @@
 {
   "name": "z-agent",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "中文优先、可审计的长程智能体桌面应用",
   "workspaces": ["apps/*"],
   "scripts": {
