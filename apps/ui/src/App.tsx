@@ -88,6 +88,7 @@ function App() {
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null);
   const activeRefreshGeneration = useRef(0);
   const sessionRefreshGeneration = useRef(0);
+  const workspaceLandingId = useRef<string | undefined>(undefined);
 
   const refreshWorkspaces = useCallback(async () => {
     const response = await api<{ workspaces: Workspace[] }>("/v1/workspaces");
@@ -104,6 +105,10 @@ function App() {
     const response = await api<{ sessions: Session[] }>(`/v1/sessions${query}`);
     if (generation !== sessionRefreshGeneration.current) return;
     setSessions(response.sessions);
+    if (workspaceId && workspaceLandingId.current === workspaceId) {
+      setActiveId(undefined);
+      return;
+    }
     setActiveId((current) => response.sessions.some((item) => item.session_id === current)
       ? current
       : response.sessions[0]?.session_id);
@@ -152,6 +157,7 @@ function App() {
 
   async function createSession() {
     try {
+      workspaceLandingId.current = undefined;
       const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: "新任务", workspace_id: activeWorkspaceId } });
       await refreshSessions(activeWorkspaceId);
       setActiveId(session.session_id);
@@ -165,13 +171,23 @@ function App() {
   async function createWorkspace(workspace: Workspace) {
     setWorkspaceDialogOpen(false);
     await refreshWorkspaces();
+    activeRefreshGeneration.current += 1;
+    sessionRefreshGeneration.current += 1;
+    workspaceLandingId.current = workspace.workspace_id;
     setActiveWorkspaceId(workspace.workspace_id);
     setActiveId(undefined);
+    setSessions([]);
+    setEvents([]);
+    setContext(undefined);
+    setLastStats(undefined);
+    setStreaming(null);
+    setError("");
   }
 
   async function switchWorkspace(workspaceId: string) {
     activeRefreshGeneration.current += 1;
     sessionRefreshGeneration.current += 1;
+    workspaceLandingId.current = undefined;
     setActiveWorkspaceId(workspaceId);
     setActiveId(undefined);
     setSessions([]);
@@ -193,6 +209,7 @@ function App() {
     let optimistic: Event | null = null;
     try {
       if (!sessionId) {
+        workspaceLandingId.current = undefined;
         const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: content.slice(0, 24), workspace_id: activeWorkspaceId } });
         sessionId = session.session_id;
         setActiveId(sessionId);
@@ -313,7 +330,7 @@ function App() {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">Z</span><div><strong>Z-Agent</strong><small>中文长程智能体</small></div></div>
       <div className="workspace-bar">
-        <select className="workspace-switcher" value={activeWorkspaceId || ""} onChange={(event) => switchWorkspace(event.target.value)} title="工作区 = agent 的安全边界（可访问目录）">
+        <select className="workspace-switcher" value={activeWorkspaceId || ""} onChange={(event) => switchWorkspace(event.target.value)} title="工作区 = agent 的安全边界（可访问目录）" aria-label="切换工作区">
           {workspaces.map((item) => <option key={item.workspace_id} value={item.workspace_id}>{item.name}{item.path ? ` · ${item.path}` : " · 未设置路径"}</option>)}
         </select>
         <button className="workspace-add" onClick={() => setWorkspaceDialogOpen(true)} title="新建工作区" aria-label="新建工作区">＋</button>
@@ -322,7 +339,7 @@ function App() {
       <button className="new-task" onClick={createSession}>＋ 新建对话</button>
       <div className="section-label">最近任务</div>
       <nav className="session-list">{sessions.map((session) =>
-        <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => setActiveId(session.session_id)}>
+        <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => { workspaceLandingId.current = undefined; setActiveId(session.session_id); }}>
           <span>{session.title}</span><small>{session.event_count} 个事件 · {formatRelativeTime(session.updated_at)}</small>
         </button>)}</nav>
       <div className="sidebar-actions">

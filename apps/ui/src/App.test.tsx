@@ -29,6 +29,42 @@ describe("Z-Agent desktop UI", () => {
     expect(screen.getByText("上下文检查器")).toBeInTheDocument();
   });
 
+  it("opens a clean landing page after creating a workspace from an active conversation", async () => {
+    let created = false;
+    window.zagent.request = vi.fn(async (path: string, options) => {
+      if (path === "/v1/workspaces" && options?.method === "POST") {
+        created = true;
+        return { workspace: { workspace_id: "ws_new", name: "新项目", path: "/tmp/new", session_count: 0 } };
+      }
+      if (path === "/v1/workspaces") return { workspaces: [
+        { workspace_id: "ws_old", name: "旧项目", path: "/tmp/old", session_count: 1 },
+        ...(created ? [{ workspace_id: "ws_new", name: "新项目", path: "/tmp/new", session_count: 0 }] : []),
+      ] };
+      if (path === "/v1/config") return {
+        locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m"
+      };
+      if (path === "/v1/sessions?workspace_id=ws_old") return { sessions: [{ session_id: "s_old", title: "旧任务", updated_at: new Date().toISOString(), event_count: 1 }] };
+      if (path === "/v1/sessions?workspace_id=ws_new") return { sessions: [] };
+      if (path === "/v1/sessions/s_old/events") return { events: [{
+        event_id: "evt_old", sequence: 1, timestamp: new Date().toISOString(), kind: "message", role: "assistant", token_estimate: 2, payload: "旧工作区内容"
+      }] };
+      if (path === "/v1/sessions/s_old/context") return { stats: { count: 1, tokens: 2 }, working_set: { tokens: 2, budget: 1000, included_event_ids: ["evt_old"], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("旧工作区内容").length).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: "新建工作区" }));
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "新项目" } });
+    fireEvent.change(screen.getByLabelText(/路径（agent 可访问的项目目录）/), { target: { value: "/tmp/new" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建工作区" }));
+
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "切换工作区" })).toHaveValue("ws_new"));
+    expect(screen.queryAllByText("旧工作区内容")).toHaveLength(0);
+    expect(screen.getByText("从一个清晰的目标开始")).toBeInTheDocument();
+    expect(screen.getByText("开始一个新任务")).toBeInTheDocument();
+  });
+
   it("keeps model reasoning collapsed until the user explicitly expands it", async () => {
     window.zagent.request = vi.fn(async (path: string) => {
       if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws_test", name: "项目", path: "/tmp/project", session_count: 1 }] };

@@ -10,6 +10,15 @@ describe("Markdown", () => {
     expect(screen.getByText("python")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "复制 python 代码" })).toBeInTheDocument();
     expect(container.querySelector("code.language-python")?.textContent).toContain("print('你好')");
+    expect(container.querySelector("code.language-python")).toHaveClass("hljs");
+    expect(container.querySelector("code.language-python .hljs-built_in")).toHaveTextContent("print");
+  });
+
+  it("auto-highlights unlabeled code without changing its source text", async () => {
+    const { container } = render(<Markdown text={"```\nconst answer = true;\n```"} />);
+    await waitFor(() => expect(container.querySelector("code.hljs")).toBeInTheDocument());
+    expect(container.querySelector("code.hljs")?.textContent).toBe("const answer = true;\n");
+    expect(container.querySelector("code.hljs")?.innerHTML).not.toBe("const answer = true;\n");
   });
 
   it("sanitizes unsafe markup and wraps wide tables", async () => {

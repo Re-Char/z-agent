@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import DOMPurify from "dompurify";
+import hljs from "highlight.js/lib/common";
+import "highlight.js/styles/github-dark-dimmed.css";
 import { marked } from "marked";
 
 marked.setOptions({ gfm: true, breaks: true });
@@ -30,10 +32,19 @@ export function Markdown({ text, className }: { text: string; className?: string
         wrapper.appendChild(table);
       }
       for (const pre of root.querySelectorAll("pre")) {
-        if (pre.parentElement?.classList.contains("code-block")) continue;
         const code = pre.querySelector("code");
         const languageClass = Array.from(code?.classList || []).find((item) => item.startsWith("language-"));
         const language = languageClass?.slice("language-".length) || "代码";
+        if (code && !code.dataset.highlighted) {
+          const source = code.textContent || "";
+          const highlighted = languageClass && hljs.getLanguage(language)
+            ? hljs.highlight(source, { language, ignoreIllegals: true })
+            : hljs.highlightAuto(source);
+          code.innerHTML = highlighted.value;
+          code.classList.add("hljs");
+          code.dataset.highlighted = "yes";
+        }
+        if (pre.parentElement?.classList.contains("code-block")) continue;
         const wrapper = document.createElement("div");
         wrapper.className = "code-block";
         const toolbar = document.createElement("div");

@@ -115,6 +115,11 @@
 - 隔离 venv editable install、console script、`python -m` 和手工 CLI 流程通过
 - `docs/v1-acceptance.md` 明确已完成边界；`docs/v2-roadmap.md` 收纳 checkpoint、runner、记忆、稠密向量、扩展 host 和生产发布
 
+### 15. 代码高亮与工作区初始页
+- Markdown fenced code 接入 highlight.js，已知语言按声明高亮、无语言代码自动识别；保留 DOMPurify、语言标签和复制按钮
+- 新建工作区时使旧异步请求失效并清空旧 sessions/events/context/streaming，显示独立的“开始一个新任务”初始页
+- 工作区下拉新增可访问名称；新增语法 token 和“从活跃会话创建工作区”交互回归
+
 ## 验证状态
 
 - Python：**119 个测试通过**，覆盖率 **84.79%**（门槛 80%）
