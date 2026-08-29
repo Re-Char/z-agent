@@ -2,6 +2,14 @@
 
 本文收纳 v1 验收后尚未完成的产品能力。所有项目继续遵守：零训练、自研 Agent loop、不依赖 Agent 框架、不使用厂商托管代码/文件工具。
 
+## 0. 实施快照（2026-08-29）
+
+- ✅ `sessions.context_version` 已迁移到 SQLite，事件、pin、archive、checkpoint 和工作区路径更新在事务中递增；已通过旧库迁移、Core 重启和双 Store 实例可见性测试。
+- ✅ 同一 Core 内的 FastAPI 并发请求通过 Store `RLock` 串行化共享 SQLite connection，修复 Electron 首屏同时请求 events/context 时的 `sqlite3.InterfaceError`；已加 12 线程压测。
+- ✅ 工具轮次/时间达上限时，Runtime 会原子写入结构化 checkpoint：目标事件、已执行工具的证据 event ID、待办工具、文件 SHA、失败原因与 archive ID。
+- ✅ GUI 能在重启后显示未解决 checkpoint，提供“继续任务”；成功续跑后记录 resolution event 并停止注入旧 checkpoint。
+- ⏳ 尚未完成：幂等 invocation 去重、受控 Runner、3 次 checkpoint 的真实长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。因此 P0 总验收仍未标记完成。
+
 ## 1. P0：长任务可靠性与证据化验收
 
 ### 1.1 Checkpoint 与续跑

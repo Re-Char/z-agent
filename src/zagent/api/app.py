@@ -8,8 +8,9 @@ from typing import Annotated, AsyncIterator, Optional
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from zagent import __version__
 from zagent.bootstrap import ApplicationContainer
-from zagent.domain.errors import NotFoundError, ValidationError, ZAgentError
+from zagent.domain.errors import AgentLimitError, NotFoundError, ValidationError, ZAgentError
 
 from .schemas import (
     AddMcpServerRequest,
@@ -47,7 +48,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
 
-    app = FastAPI(title="Z-Agent Core API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Z-Agent Core API", version=__version__, lifespan=lifespan)
     app.state.container = container
 
     def authorize(authorization: Optional[str] = Header(default=None)) -> None:
@@ -57,11 +58,14 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     @app.exception_handler(ZAgentError)
     async def handle_domain_error(_: Request, exc: ZAgentError) -> JSONResponse:
         code = status.HTTP_404_NOT_FOUND if isinstance(exc, NotFoundError) else status.HTTP_400_BAD_REQUEST
-        return JSONResponse(status_code=code, content={"error": str(exc)})
+        content = {"error": str(exc)}
+        if isinstance(exc, AgentLimitError) and exc.checkpoint:
+            content["checkpoint"] = exc.checkpoint
+        return JSONResponse(status_code=code, content=content)
 
     @app.get("/health")
     def health() -> dict:
-        return {"ok": True, "version": "0.1.0"}
+        return {"ok": True, "version": __version__}
 
     protected = [Depends(authorize)]
 
@@ -136,7 +140,10 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
                 for event in core.agent.send_stream(session_id, body.content):
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except Exception as exc:  # noqa: BLE001 - surface any failure as a streamed error
-                yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+                payload = {"type": "error", "message": str(exc)}
+                if isinstance(exc, AgentLimitError) and exc.checkpoint:
+                    payload["checkpoint"] = exc.checkpoint
+                yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
         return StreamingResponse(
             generate(),

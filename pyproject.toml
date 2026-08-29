@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "z-agent-core"
-version = "0.1.0"
+version = "0.1.1"
 description = "Chinese-first agent runtime with agentic context management"
 requires-python = ">=3.12,<3.13"
 license = {text = "MIT"}

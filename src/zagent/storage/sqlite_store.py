@@ -6,8 +6,8 @@ import json
 import sqlite3
 import threading
 import uuid
-from collections import defaultdict
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -19,6 +19,16 @@ from .blob_store import BlobStore
 from .schema import MIGRATIONS_SQL, SCHEMA_SQL
 
 
+def _serialized(method):
+    """Serialize every operation sharing the process-wide SQLite connection."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 class SqliteStore:
     """Append-only session/event repository with addressable external blobs."""
 
@@ -28,7 +38,6 @@ class SqliteStore:
         self._blob_threshold = blob_threshold
         self._blobs = BlobStore(root / "blobs")
         self._lock = threading.RLock()
-        self._context_version: Dict[str, int] = defaultdict(int)
         self._db = sqlite3.connect(str(root / "state.db"), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._db.execute("PRAGMA journal_mode=WAL")
@@ -60,6 +69,7 @@ class SqliteStore:
 
     # --- workspaces ----------------------------------------------------------
 
+    @_serialized
     def create_workspace(self, name: str, path: str = "") -> Dict[str, Any]:
         workspace_id = "ws_" + uuid.uuid4().hex
         now = self._now()
@@ -70,6 +80,7 @@ class SqliteStore:
             )
         return self.get_workspace(workspace_id)
 
+    @_serialized
     def get_workspace(self, workspace_id: str) -> Dict[str, Any]:
         row = self._db.execute(
             "SELECT * FROM workspaces WHERE workspace_id=?", (workspace_id,)
@@ -82,6 +93,7 @@ class SqliteStore:
         ).fetchone()[0]
         return result
 
+    @_serialized
     def update_workspace(
         self, workspace_id: str, name: Optional[str] = None, path: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -103,6 +115,7 @@ class SqliteStore:
                     self._bump_context_version(row["session_id"])
         return self.get_workspace(workspace_id)
 
+    @_serialized
     def list_workspaces(self) -> List[Dict[str, Any]]:
         rows = self._db.execute(
             """SELECT w.*, COUNT(s.session_id) AS session_count
@@ -111,12 +124,14 @@ class SqliteStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    @_serialized
     def default_workspace_id(self) -> str:
         row = self._db.execute(
             "SELECT workspace_id FROM workspaces ORDER BY created_at LIMIT 1"
         ).fetchone()
         return row["workspace_id"] if row else self.create_workspace("默认工作区", "")["workspace_id"]
 
+    @_serialized
     def create_session(self, title: str = "新任务", workspace_id: Optional[str] = None) -> Dict[str, Any]:
         session_id = "ses_" + uuid.uuid4().hex
         now = self._now()
@@ -128,6 +143,7 @@ class SqliteStore:
             )
         return self.get_session(session_id)
 
+    @_serialized
     def get_session(self, session_id: str) -> Dict[str, Any]:
         row = self._db.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone()
         if row is None:
@@ -138,6 +154,7 @@ class SqliteStore:
         ).fetchone()[0]
         return result
 
+    @_serialized
     def list_sessions(self, workspace_id: Optional[str] = None) -> List[Dict[str, Any]]:
         if workspace_id:
             self.get_workspace(workspace_id)
@@ -155,6 +172,7 @@ class SqliteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @_serialized
     def append_event(
         self,
         session_id: str,
@@ -225,11 +243,23 @@ class SqliteStore:
 
     def _bump_context_version(self, session_id: str) -> None:
         """Invalidate cached working sets for a session after any context write."""
-        self._context_version[session_id] += 1
+        cursor = self._db.execute(
+            "UPDATE sessions SET context_version=context_version+1 WHERE session_id=?",
+            (session_id,),
+        )
+        if cursor.rowcount != 1:
+            raise NotFoundError("session not found")
 
+    @_serialized
     def context_version(self, session_id: str) -> int:
-        """Monotonic version used by WorkingSetBuilder to cache builds per session."""
-        return self._context_version.get(session_id, 0)
+        """Return the database-backed working-set cache version for a session."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT context_version FROM sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        if row is None:
+            raise NotFoundError("session not found")
+        return int(row["context_version"])
 
     def _store_payload(self, serialized: str) -> tuple[Optional[str], Optional[str]]:
         if len(serialized.encode("utf-8")) <= self._blob_threshold:
@@ -257,12 +287,14 @@ class SqliteStore:
             tags=json.loads(row["tags"]), sensitivity=row["sensitivity"], provenance=row["provenance"],
         )
 
+    @_serialized
     def get_event(self, event_id: str) -> EventRecord:
         row = self._db.execute("SELECT * FROM events WHERE event_id=?", (event_id,)).fetchone()
         if row is None:
             raise NotFoundError("event not found")
         return self._to_event(row)
 
+    @_serialized
     def list_events(self, session_id: str, *, limit: int = 200, after: int = 0) -> List[EventRecord]:
         self.get_session(session_id)
         rows = self._db.execute(
@@ -271,12 +303,14 @@ class SqliteStore:
         ).fetchall()
         return [self._to_event(row) for row in rows]
 
+    @_serialized
     def recent_events(self, session_id: str, limit: int) -> List[EventRecord]:
         rows = self._db.execute(
             "SELECT * FROM events WHERE session_id=? ORDER BY sequence DESC LIMIT ?", (session_id, limit)
         ).fetchall()
         return [self._to_event(row) for row in reversed(rows)]
 
+    @_serialized
     def recent_active_events(self, session_id: str, limit: int) -> List[EventRecord]:
         """Return recent events that are not covered by an archive range.
 
@@ -288,7 +322,7 @@ class SqliteStore:
         rows = self._db.execute(
             """SELECT e.* FROM events e
                WHERE e.session_id=?
-                 AND e.kind NOT IN ('model_raw', 'archive', 'assistant_reasoning')
+                 AND e.kind NOT IN ('model_raw', 'archive', 'checkpoint', 'assistant_reasoning')
                  AND e.sensitivity!='internal'
                  AND NOT EXISTS (
                    SELECT 1 FROM archives a
@@ -300,18 +334,20 @@ class SqliteStore:
         ).fetchall()
         return [self._to_event(row) for row in reversed(rows)]
 
+    @_serialized
     def list_searchable_events(self, session_id: str, limit: int = 1000) -> List[EventRecord]:
         """Return a bounded recent corpus for non-persistent vector retrieval."""
         self.get_session(session_id)
         rows = self._db.execute(
             """SELECT * FROM events
                WHERE session_id=? AND sensitivity!='internal'
-                 AND kind NOT IN ('model_raw', 'assistant_reasoning')
+                 AND kind NOT IN ('model_raw', 'checkpoint', 'assistant_reasoning')
                ORDER BY sequence DESC LIMIT ?""",
             (session_id, max(1, min(limit, 5000))),
         ).fetchall()
         return [self._to_event(row) for row in rows]
 
+    @_serialized
     def search_events(self, session_id: str, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         self.get_session(session_id)
         terms = searchable_text(query).split()
@@ -348,9 +384,11 @@ class SqliteStore:
             })
         return sorted(weighted, key=lambda item: item["score"])[:limit]
 
+    @_serialized
     def pin_event(self, session_id: str, event_id: str, rationale: str) -> None:
         self.pin_events(session_id, [event_id], rationale)
 
+    @_serialized
     def pin_events(self, session_id: str, event_ids: Sequence[str], rationale: str) -> None:
         """Atomically validate and pin a batch of events."""
         unique_ids = list(dict.fromkeys(event_ids))
@@ -366,9 +404,11 @@ class SqliteStore:
             if unique_ids:
                 self._bump_context_version(session_id)
 
+    @_serialized
     def unpin_event(self, session_id: str, event_id: str) -> None:
         self.unpin_events(session_id, [event_id])
 
+    @_serialized
     def unpin_events(self, session_id: str, event_ids: Sequence[str]) -> None:
         unique_ids = list(dict.fromkeys(event_ids))
         with self._lock, self._db:
@@ -379,12 +419,14 @@ class SqliteStore:
             if unique_ids:
                 self._bump_context_version(session_id)
 
+    @_serialized
     def pinned_event_ids(self, session_id: str) -> set[str]:
         rows = self._db.execute(
             "SELECT event_id FROM pins WHERE session_id=?", (session_id,)
         ).fetchall()
         return {row["event_id"] for row in rows}
 
+    @_serialized
     def pinned_events(self, session_id: str) -> List[EventRecord]:
         rows = self._db.execute(
             """SELECT e.* FROM pins p JOIN events e ON e.event_id=p.event_id
@@ -393,6 +435,7 @@ class SqliteStore:
         ).fetchall()
         return [self._to_event(row) for row in rows]
 
+    @_serialized
     def pinned_token_total(self, session_id: str) -> int:
         row = self._db.execute(
             """SELECT COALESCE(SUM(e.token_estimate), 0) AS total
@@ -404,6 +447,7 @@ class SqliteStore:
         ).fetchone()
         return int(row["total"])
 
+    @_serialized
     def create_archive(
         self, session_id: str, start_sequence: int, end_sequence: int, reason: str, state: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -438,7 +482,10 @@ class SqliteStore:
                 session_id, "archive", "system", summary, tags=["archive"]
             )
             self._db.execute(
-                "INSERT INTO archives VALUES(?,?,?,?,?,?,?,?)",
+                """INSERT INTO archives(
+                       archive_id,session_id,start_sequence,end_sequence,
+                       summary_event_id,reason,state_json,created_at
+                   ) VALUES(?,?,?,?,?,?,?,?)""",
                 (archive_id, session_id, start_sequence, end_sequence, summary_event.event_id, reason,
                  json.dumps(state, ensure_ascii=False), self._now()),
             )
@@ -446,6 +493,7 @@ class SqliteStore:
         return {"archive_id": archive_id, "summary_event_id": summary_event.event_id,
                 "event_range": [start_sequence, end_sequence], "state": state}
 
+    @_serialized
     def latest_archive(self, session_id: str) -> Optional[Dict[str, Any]]:
         row = self._db.execute(
             "SELECT * FROM archives WHERE session_id=? ORDER BY created_at DESC LIMIT 1", (session_id,)
@@ -456,6 +504,94 @@ class SqliteStore:
         result["state"] = json.loads(result.pop("state_json"))
         return result
 
+    @_serialized
+    def create_checkpoint(
+        self,
+        session_id: str,
+        trigger_event_id: str,
+        reason: str,
+        state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Persist a runtime-owned recovery checkpoint and its audit event atomically."""
+        trigger = self.get_event(trigger_event_id)
+        if trigger.session_id != session_id:
+            raise ValidationError("checkpoint trigger belongs to another session")
+        checkpoint_id = "chk_" + uuid.uuid4().hex
+        payload = {"checkpoint_id": checkpoint_id, "reason": reason, "state": state}
+        created_at = self._now()
+        with self._lock, self._db:
+            checkpoint_event = self._insert_event(
+                session_id,
+                "checkpoint",
+                "system",
+                payload,
+                parent_event_id=trigger_event_id,
+                tags=["checkpoint", "recoverable"],
+                provenance="agent-runtime",
+            )
+            self._db.execute(
+                """INSERT INTO checkpoints(
+                       checkpoint_id,session_id,trigger_event_id,checkpoint_event_id,
+                       reason,state_json,created_at,resolved_at,resolution_event_id
+                   ) VALUES(?,?,?,?,?,?,?,NULL,NULL)""",
+                (
+                    checkpoint_id,
+                    session_id,
+                    trigger_event_id,
+                    checkpoint_event.event_id,
+                    reason,
+                    json.dumps(state, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            self._bump_context_version(session_id)
+        return {
+            "checkpoint_id": checkpoint_id,
+            "checkpoint_event_id": checkpoint_event.event_id,
+            "trigger_event_id": trigger_event_id,
+            "reason": reason,
+            "state": state,
+            "created_at": created_at,
+        }
+
+    @_serialized
+    def latest_checkpoint(
+        self, session_id: str, *, active_only: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        self.get_session(session_id)
+        condition = " AND resolved_at IS NULL" if active_only else ""
+        row = self._db.execute(
+            f"SELECT * FROM checkpoints WHERE session_id=?{condition} "
+            "ORDER BY created_at DESC LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["state"] = json.loads(result.pop("state_json"))
+        return result
+
+    @_serialized
+    def resolve_active_checkpoint(
+        self, session_id: str, resolution_event_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Mark the newest paused checkpoint resolved after a successful continuation."""
+        resolution = self.get_event(resolution_event_id)
+        if resolution.session_id != session_id:
+            raise ValidationError("checkpoint resolution belongs to another session")
+        active = self.latest_checkpoint(session_id, active_only=True)
+        if active is None:
+            return None
+        with self._lock, self._db:
+            self._db.execute(
+                """UPDATE checkpoints SET resolved_at=?, resolution_event_id=?
+                   WHERE checkpoint_id=? AND resolved_at IS NULL""",
+                (self._now(), resolution_event_id, active["checkpoint_id"]),
+            )
+            self._bump_context_version(session_id)
+        return self.latest_checkpoint(session_id)
+
+    @_serialized
     def archive_stats(self, session_id: str) -> Dict[str, int]:
         """Count distinct source events currently externalized by archives."""
         row = self._db.execute(
@@ -470,6 +606,7 @@ class SqliteStore:
         ).fetchone()
         return {"count": int(row["count"]), "tokens": int(row["tokens"])}
 
+    @_serialized
     def session_stats(self, session_id: str) -> Dict[str, int]:
         self.get_session(session_id)
         row = self._db.execute(
@@ -479,5 +616,6 @@ class SqliteStore:
         ).fetchone()
         return dict(row)
 
+    @_serialized
     def close(self) -> None:
         self._db.close()

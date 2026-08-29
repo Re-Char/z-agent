@@ -1,7 +1,7 @@
 # Z-Agent 改动概览（for Codex）
 
 > 面向后续接手者的快速导航。基线：`eda4ff1`（"merge remote repository initialization"）。
-> 本分支相对基线包含 12 轮迭代，覆盖后端核心、前端交互、上下文管理、工作区安全和真实长任务验收。
+> 本分支相对基线已完成 v1 验收并进入 v2 首轮实施，覆盖后端核心、前端交互、上下文管理、工作区安全和真实长任务验收。
 
 ## 一分钟速览
 
@@ -120,10 +120,20 @@
 - 新建工作区时使旧异步请求失效并清空旧 sessions/events/context/streaming，显示独立的“开始一个新任务”初始页
 - 工作区下拉新增可访问名称；新增语法 token 和“从活跃会话创建工作区”交互回归
 
+### 16. v2 首轮：持久缓存版本与可恢复 checkpoint
+
+- `sessions.context_version` 改为 SQLite 持久列；旧库自动迁移，Core 重启与多 Store 实例能观察同一单调版本。
+- 新增 `checkpoints` 结构表与审计 event；达到工具轮次/时间上限时记录目标、已执行工具 event ID、待办、文件 SHA、失败原因与 archive ID。
+- 未解决 checkpoint 只作为系统状态注入，不插入 provider 工具轮；成功续跑后以最终 event ID 标记解决。
+- Electron GUI 显示持久恢复条和“继续任务”，Context Inspector 显示已完成/待办数；checkpoint 原始 event 不作为聊天气泡重复显示。
+- highlight.js 从整套 common 语言改为 15 种常用开发语言，JS 从约 467KB/150KB gzip 降到 390KB/123KB gzip。
+- Python Core 版本元数据与 Electron 统一为 `0.1.1`，API/health 从单一 `__version__` 读取。
+- 真实 Electron 启动烟测暴露并修复共享 SQLite connection 的并发读取竞态：events/context 同时请求不再出现 `InterfaceError` 或错误空态。
+
 ## 验证状态
 
-- Python：**119 个测试通过**，覆盖率 **84.79%**（门槛 80%）
-- 前端：**7 个 Vitest 测试** + strict typecheck + Vite production build 全绿
+- Python：**125 个测试通过**，覆盖率 **约 85%**（门槛 80%），Ruff 全绿
+- 前端：**10 个 Vitest 测试** + strict typecheck + Vite production build 全绿
 - E2E（真实 DeepSeek）：从空工作区创建项目 → 外部测试反馈修复 → 归档/固定 → 二阶段扩展 → 44/44 项目测试与安装级验证
 - 详细验证记录：`docs/verification-report.md`（12 轮迭代逐项记录）
 
@@ -131,6 +141,6 @@
 
 1. **运行实例需重启 Electron 才能加载新代码**（用户本地应用跑的是旧构建）
 2. 工作区必须设置路径后 agent 才能读文件（侧边栏 ✎ 编辑）
-3. `WorkingSetBuilder` 缓存是进程内按版本失效；若未来多进程共享存储需迁移到 DB 版本号
+3. `WorkingSetBuilder` 投影仍在进程内缓存，但失效版本已持久到 SQLite；模型/工具 schema 版本纳入缓存键仍属 v2 待办
 4. 测试基础设施（CDP 浏览器驱动、SSE 代理桥）是临时脚本，未入库；`tests/` 内的都是持久化测试
 5. `.conda/envs/zagent` 是本地 conda 环境；`estimate_tokens` 中文 1 字符 ≈ 1 token（口径已在工具描述注明）

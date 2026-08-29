@@ -169,6 +169,12 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .send-button.stop:hover { background: #3a2027; }
 .send-button:disabled { opacity: .35; cursor: default; }
 .composer-dock > small { display: block; width: min(100%, var(--content-width)); margin: 7px auto 0; color: #525e70; text-align: center; font-size: 9px; }
+.recovery-banner { width: min(calc(100% - 2 * var(--page-gutter)), var(--content-width)); margin: 0 auto 8px; display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 12px; border: 1px solid #4e735f; border-radius: 10px; background: #13251e; color: #b9decf; }
+.recovery-banner > div { min-width: 0; display: grid; gap: 2px; }
+.recovery-banner strong { font-size: 11px; }
+.recovery-banner span { color: #759c8c; font-size: 10px; overflow-wrap: anywhere; }
+.recovery-banner button { flex: none; padding: 7px 10px; border: 1px solid #4d8c70; border-radius: 8px; background: #1c3b2e; color: #8ce2bd; font-size: 10px; }
+.recovery-banner button:disabled { opacity: .45; cursor: default; }
 .error-banner { width: min(calc(100% - 2 * var(--page-gutter)), var(--content-width)); margin: 0 auto; display: flex; align-items: flex-start; gap: 10px; padding: 10px 12px; border: 1px solid #703740; border-radius: 10px; background: #421e24; color: #ffb2b8; font-size: 11px; line-height: 1.5; }
 .error-banner span { min-width: 0; flex: 1; overflow-wrap: anywhere; }
 .error-banner button { flex: none; border: 0; background: transparent; color: #d9868d; font-size: 17px; line-height: 1; }

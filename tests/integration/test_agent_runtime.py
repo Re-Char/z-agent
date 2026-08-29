@@ -41,8 +41,61 @@ def test_agent_stops_at_tool_round_limit(store, session_id, context):
         AgentRuntimeLimits(max_tool_rounds=1, task_timeout_seconds=10),
     )
     import pytest
-    with pytest.raises(AgentLimitError):
+    with pytest.raises(AgentLimitError) as caught:
         runtime.send(session_id, "循环")
+
+    checkpoint = caught.value.checkpoint
+    assert checkpoint is not None
+    assert checkpoint["reason"] == "max_tool_rounds"
+    assert checkpoint["state"]["tool_rounds_completed"] == 1
+    assert checkpoint["state"]["pending"] == [{"call_id": "call_1", "tool": "context_status"}]
+    evidence = checkpoint["state"]["completed"][0]
+    assert evidence["tool"] == "context_status"
+    assert store.get_event(evidence["tool_result_event_id"]).kind == "tool_result"
+    assert store.latest_checkpoint(session_id)["checkpoint_id"] == checkpoint["checkpoint_id"]
+
+    working = context.build_working_set(session_id)
+    assert checkpoint["checkpoint_id"] in working.messages[0]["content"]
+    assert all(message.get("content") != str(checkpoint) for message in working.messages[1:])
+
+    continuation_provider = SequenceProvider([ModelResponse(content="继续后已完成")])
+    continuation = AgentRuntime(
+        store, context, continuation_provider, ContextToolExecutor(context)
+    )
+    result = continuation.send(session_id, "继续任务")
+    assert result.final_event.payload == "继续后已完成"
+    assert checkpoint["checkpoint_id"] in continuation_provider.messages[0][0]["content"]
+    assert store.latest_checkpoint(session_id, active_only=True) is None
+    assert store.latest_checkpoint(session_id)["resolution_event_id"] == result.final_event.event_id
+
+
+def test_agent_checkpoint_file_versions_are_evidence_backed(store, session_id, context):
+    class FileToolExecutor:
+        schemas = []
+
+        def execute(self, _session_id, _name, _arguments):
+            return {"path": "src/main.py", "sha256": "a" * 64, "ok": True}
+
+    provider = SequenceProvider([
+        ModelResponse(content="", tool_calls=[ToolCall("write_1", "fs_write", {})]),
+        ModelResponse(content="", tool_calls=[ToolCall("read_2", "fs_read", {})]),
+    ])
+    runtime = AgentRuntime(
+        store,
+        context,
+        provider,
+        FileToolExecutor(),
+        AgentRuntimeLimits(max_tool_rounds=1, task_timeout_seconds=10),
+    )
+
+    import pytest
+    with pytest.raises(AgentLimitError) as caught:
+        runtime.send(session_id, "写入并检查代码")
+
+    version = caught.value.checkpoint["state"]["file_versions"][0]
+    assert version["path"] == "src/main.py"
+    assert version["sha256"] == "a" * 64
+    assert store.get_event(version["evidence_event_id"]).tool_name == "fs_write"
 
 
 def test_agent_preserves_reasoning_content_across_tool_round(store, session_id, context):

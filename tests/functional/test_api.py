@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from zagent.api import create_api
 from zagent.bootstrap import ApplicationContainer
+from zagent.domain.errors import AgentLimitError
 
 
 def test_api_session_message_and_context_flow(tmp_path):
@@ -32,6 +33,44 @@ def test_api_rejects_missing_auth(tmp_path):
         with TestClient(create_api(container, auth_token="secret")) as client:
             assert client.get("/v1/sessions").status_code == 401
             assert client.get("/health").status_code == 200
+    finally:
+        container.close()
+
+
+def test_api_exposes_recoverable_checkpoint_for_blocking_and_streaming_calls(tmp_path):
+    container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
+    checkpoint = {"checkpoint_id": "chk_test", "reason": "max_tool_rounds", "state": {}}
+
+    class LimitAgent:
+        def send(self, _session_id, _content):
+            raise AgentLimitError("已保存 checkpoint", checkpoint)
+
+        def send_stream(self, _session_id, _content):
+            if False:
+                yield None
+            raise AgentLimitError("已保存 checkpoint", checkpoint)
+
+    container.agent = LimitAgent()
+    try:
+        session_id = container.store.create_session("checkpoint API")["session_id"]
+        with TestClient(create_api(container, auth_token="test-token")) as client:
+            headers = {"Authorization": "Bearer test-token"}
+            blocking = client.post(
+                f"/v1/sessions/{session_id}/messages",
+                headers=headers,
+                json={"content": "继续"},
+            )
+            assert blocking.status_code == 400
+            assert blocking.json()["checkpoint"]["checkpoint_id"] == "chk_test"
+
+            streaming = client.post(
+                f"/v1/sessions/{session_id}/messages/stream",
+                headers=headers,
+                json={"content": "继续"},
+            )
+            assert streaming.status_code == 200
+            assert '"type": "error"' in streaming.text
+            assert '"checkpoint_id": "chk_test"' in streaming.text
     finally:
         container.close()
 

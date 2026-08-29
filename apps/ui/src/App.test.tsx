@@ -155,6 +155,55 @@ describe("Z-Agent desktop UI", () => {
     expect(screen.queryByText(/内部工具结果/)).not.toBeInTheDocument();
   });
 
+  it("offers one-click continuation from a persisted checkpoint", async () => {
+    let checkpointActive = false;
+    let streamCalls = 0;
+    const checkpoint = {
+      checkpoint_id: "chk_1234567890ab", reason: "max_tool_rounds",
+      state: { status: "paused", completed: [{ tool: "fs_read" }], pending: [{ tool: "fs_write" }] },
+    };
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "长任务", updated_at: new Date().toISOString(), event_count: checkpointActive ? 2 : 0 }] };
+      if (path === "/v1/sessions/s1/events") return { events: checkpointActive ? [
+        { event_id: "u1", sequence: 1, timestamp: new Date().toISOString(), kind: "message", role: "user", token_estimate: 2, payload: "完成项目" },
+        { event_id: "cp1", sequence: 2, timestamp: new Date().toISOString(), kind: "checkpoint", role: "system", token_estimate: 8, payload: checkpoint },
+      ] : [] };
+      if (path === "/v1/sessions/s1/context") return {
+        stats: { count: checkpointActive ? 2 : 0, tokens: 0 },
+        working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 },
+        latest_checkpoint: checkpointActive ? checkpoint : null, pinned_tokens: 0,
+      };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+    window.zagent.requestStream = vi.fn(async () => {
+      streamCalls += 1;
+      if (streamCalls === 1) {
+        checkpointActive = true;
+        return { type: "error", message: "已达到本轮工具调用上限", checkpoint };
+      }
+      checkpointActive = false;
+      return { type: "done", result: { stats: { total_tokens: 1, completion_tokens: 1, cache_hit_tokens: 0, cache_miss_tokens: 0, cache_hit_rate: 0, elapsed_seconds: 1, tokens_per_second: 1 } } };
+    }) as ZAgentBridge["requestStream"];
+
+    render(<App />);
+    await waitFor(() => expect(screen.getAllByText("长任务").length).toBeGreaterThan(0));
+    const input = await screen.findByRole("textbox", { name: "任务输入" });
+    fireEvent.change(input, { target: { value: "完成项目" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const resume = await screen.findByRole("button", { name: "继续任务" });
+    expect(screen.getByText(/进度已写入 1234567890ab/)).toBeInTheDocument();
+    expect(screen.queryByText(/kind.*checkpoint/)).not.toBeInTheDocument();
+    fireEvent.click(resume);
+
+    await waitFor(() => expect(window.zagent.requestStream).toHaveBeenCalledTimes(2));
+    const secondOptions = vi.mocked(window.zagent.requestStream!).mock.calls[1][1];
+    expect((secondOptions?.body as { content: string }).content).toContain("文件 SHA");
+    await waitFor(() => expect(screen.queryByRole("button", { name: "继续任务" })).not.toBeInTheDocument());
+  });
+
   it("restores the draft and shows a useful error when session creation fails", async () => {
     window.zagent.request = vi.fn(async (path: string, options) => {
       if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 0 }] };

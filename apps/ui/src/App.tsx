@@ -3,7 +3,8 @@ import { Markdown } from "./Markdown";
 
 type Session = { session_id: string; title: string; updated_at: string; event_count: number };
 type Event = { event_id: string; sequence: number; timestamp: string; kind: string; role: string; payload: unknown; token_estimate: number; tool_name?: string };
-type ContextStatus = { stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; archive_stats?: { count: number; tokens: number }; warning?: string | null; pinned_tokens: number };
+type Checkpoint = { checkpoint_id: string; reason: string; state: { status?: string; objective?: string; completed?: unknown[]; pending?: unknown[]; failure_reason?: string } };
+type ContextStatus = { stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; latest_checkpoint?: Checkpoint | null; archive_stats?: { count: number; tokens: number }; warning?: string | null; pinned_tokens: number };
 type ModelConfig = { id: string; name: string; provider: string; model: string; base_url: string; context_window: number; soft_limit_ratio: number; hard_limit_ratio: number };
 type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string };
 type TokenStats = { total_tokens: number; completion_tokens: number; cache_hit_tokens: number; cache_miss_tokens: number; cache_hit_rate: number; elapsed_seconds: number; tokens_per_second: number };
@@ -197,16 +198,15 @@ function App() {
     setError("");
   }
 
-  async function send(event: FormEvent) {
-    event.preventDefault();
-    if (!input.trim() || busy) return;
-    const content = input;
+  async function submitMessage(content: string) {
+    if (!content.trim() || busy) return;
     let sessionId = activeId;
     setInput("");
     setBusy(true);
     cancelRequested.current = false;
     setError("");
     let optimistic: Event | null = null;
+    let checkpointFailure: Checkpoint | undefined;
     try {
       if (!sessionId) {
         workspaceLandingId.current = undefined;
@@ -240,6 +240,7 @@ function App() {
           await Promise.all([refreshActive(targetSessionId), refreshSessions(activeWorkspaceId)]);
           return;
         }
+        if (outcome?.checkpoint) checkpointFailure = outcome.checkpoint;
         if (outcome?.message) throw new Error(outcome.message);
         if (outcome?.result && (outcome.result as { stats?: TokenStats }).stats) {
           setLastStats((outcome.result as { stats: TokenStats }).stats);
@@ -251,16 +252,29 @@ function App() {
       await Promise.all([refreshActive(targetSessionId), refreshSessions(activeWorkspaceId)]);
     } catch (reason) {
       if (!cancelRequested.current) {
-        if (optimistic) {
+        if (checkpointFailure && sessionId) {
+          await Promise.all([refreshActive(sessionId), refreshSessions(activeWorkspaceId)]);
+        } else if (optimistic) {
           setEvents((current) => current.filter((item) => item.event_id !== optimistic!.event_id));
         }
-        setInput((current) => current || content);
+        if (!checkpointFailure) setInput((current) => current || content);
         setError(friendlyError(reason));
       }
     } finally {
       setBusy(false);
       setStreaming(null);
     }
+  }
+
+  async function send(event: FormEvent) {
+    event.preventDefault();
+    await submitMessage(input);
+  }
+
+  async function resumeTask() {
+    await submitMessage(
+      "继续当前任务。请使用系统提示中最新的 checkpoint，先按 event ID 和文件 SHA 核对已完成结果，再从 pending 继续，不要重复已完成的写入。"
+    );
   }
 
   async function stopGeneration() {
@@ -323,6 +337,7 @@ function App() {
   const visibleEvents = events.filter((item) =>
     item.kind !== "model_raw"
     && item.kind !== "archive"
+    && item.kind !== "checkpoint"
     && (showToolTrace || !isToolTrace(item) || hasReasoning(item))
   );
 
@@ -385,6 +400,10 @@ function App() {
         </article>}
         {busy && !streaming && <div className="thinking" role="status"><i></i><i></i><i></i><span>正在思考；完成后可手动展开</span></div>}
       </section>
+      {context?.latest_checkpoint && <div className="recovery-banner" role="status">
+        <div><strong>任务已安全暂停</strong><span>{context.latest_checkpoint.reason === "max_tool_rounds" ? "已达本轮工具上限" : "已达本轮时间上限"}，进度已写入 {context.latest_checkpoint.checkpoint_id.slice(-12)}。</span></div>
+        <button type="button" onClick={resumeTask} disabled={busy}>继续任务</button>
+      </div>}
       {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="关闭错误提示">×</button></div>}
       <div className="composer-dock"><form className="composer" onSubmit={send}>
         <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
@@ -431,6 +450,10 @@ function App() {
             <p>已外置 {context.archive_stats?.count ?? "—"} 个事件（约 {context.archive_stats?.tokens.toLocaleString() ?? "—"} tokens）。结构化状态已注入系统提示词；原文仍可检索和按 event ID 取回。</p>
           </div>
         : <p>模型在完成任务阶段后会调用归档工具，在这里留下任务状态摘要。你也可以通过对话要求"归档当前阶段"。</p>}</div>
+      {context?.latest_checkpoint && <div className="inspector-section"><h3>可恢复 CHECKPOINT</h3>
+        <div className="archive-card"><code>{context.latest_checkpoint.checkpoint_id}</code>
+          <p>已完成 {context.latest_checkpoint.state.completed?.length || 0} 个工具调用，待处理 {context.latest_checkpoint.state.pending?.length || 0} 项。续跑时会核对证据 event ID 和文件 SHA。</p>
+        </div></div>}
     </aside>
 
     {settingsOpen && config && <Settings config={config} onClose={() => setSettingsOpen(false)} onSaved={(next) => { setConfig(next); }} />}

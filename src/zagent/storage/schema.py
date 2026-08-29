@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     workspace_id TEXT REFERENCES workspaces(workspace_id),
+    context_version INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -56,6 +57,19 @@ CREATE TABLE IF NOT EXISTS archives (
 );
 CREATE INDEX IF NOT EXISTS idx_archives_session_range
     ON archives(session_id, start_sequence, end_sequence);
+CREATE TABLE IF NOT EXISTS checkpoints (
+    checkpoint_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    trigger_event_id TEXT NOT NULL REFERENCES events(event_id),
+    checkpoint_event_id TEXT NOT NULL REFERENCES events(event_id),
+    reason TEXT NOT NULL,
+    state_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    resolution_event_id TEXT REFERENCES events(event_id)
+);
+CREATE INDEX IF NOT EXISTS idx_checkpoints_session_created
+    ON checkpoints(session_id, created_at);
 """
 
 # Best-effort migrations for databases created before the v2 schema.
@@ -63,4 +77,8 @@ CREATE INDEX IF NOT EXISTS idx_archives_session_range
 MIGRATIONS_SQL = [
     # v1 -> v2: workspaces; sessions gain an optional workspace_id column.
     """ALTER TABLE sessions ADD COLUMN workspace_id TEXT REFERENCES workspaces(workspace_id)""",
+    # Persist working-set cache invalidation across Core restarts and processes.
+    """ALTER TABLE sessions ADD COLUMN context_version INTEGER NOT NULL DEFAULT 0""",
+    """ALTER TABLE checkpoints ADD COLUMN resolved_at TEXT""",
+    """ALTER TABLE checkpoints ADD COLUMN resolution_event_id TEXT REFERENCES events(event_id)""",
 ]

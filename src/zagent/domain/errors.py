@@ -23,5 +23,6 @@ class ToolExecutionError(ZAgentError):
 
 
 class AgentLimitError(ZAgentError):
-    pass
-
+    def __init__(self, message: str, checkpoint: dict | None = None) -> None:
+        super().__init__(message)
+        self.checkpoint = checkpoint

@@ -364,3 +364,15 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - 暴露限制：首轮达到默认 8 工具轮上限，需要同一 session 续轮；模型最终自述有一次文件名单复数偏差；无受控 runner 时测试仍由外部执行。
 
 完整过程、archive ID 与 v2 改进项见 `docs/v1-acceptance.md`。
+
+## 17. v2 首轮可靠性与前端优化（2026-08-29）
+
+- 发布验收：GitHub `v0.1.0` 与 `v0.1.1` 均包含 arm64 DMG、blockmap、显式源码归档和 `SHA256SUMS.txt`；一次性 Actions 工作流已从主分支删除。
+- 产品修正：Markdown 代码块实际生成 highlight token；从活跃会话新建工作区后清空旧页面并保留独立初始页。
+- bundle 优化：只注册 15 种常用代码语言，Vite JS 从约 467.33KB（gzip 150.46KB）降至 389.63KB（gzip 123.49KB）。
+- SQLite 可靠性：`context_version` 持久化；旧库迁移、重启保留、双 Store 可见和工作区缓存失效通过。
+- Electron 真实启动首次暴露 events/context 并发读取共享 SQLite connection 的 `InterfaceError`；Store 所有公开 DB 操作改为 `RLock` 串行化，12 线程压测与重启 Electron 复验通过，旧会话事件和 Context Inspector 同时正常加载。
+- Checkpoint：轮次/时间超限会写入结构状态与证据 event ID；API/SSE 暴露可恢复元数据；GUI 一键续跑，成功后以 resolution event 解决 checkpoint。
+- 自动化：125 个 Python 测试通过，分支覆盖率约 85%（门槛 80%），Ruff 通过；10 个 Vitest、TypeScript strict typecheck 与 Vite production build 通过。
+
+未标记完成的 P0：幂等 invocation 去重、受控测试 Runner、三次 checkpoint 真实长任务故障注入、模型/工具 schema 版本缓存键。

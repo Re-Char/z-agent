@@ -66,6 +66,7 @@ class ContextOrchestrator:
                 "stats": self._store.session_stats(session_id),
                 "working_set": working_set_data,
                 "latest_archive": self._store.latest_archive(session_id),
+                "latest_checkpoint": self._store.latest_checkpoint(session_id, active_only=True),
                 "archive_stats": self._store.archive_stats(session_id),
                 "warning": warning,
                 "pinned_tokens": working_set.pinned_tokens,
@@ -97,7 +98,7 @@ class ContextOrchestrator:
                 raise ToolExecutionError("不能固定其他会话的事件")
             blocked = [
                 event.event_id for event in events
-                if event.kind in {"model_raw", "archive", "assistant_reasoning"}
+                if event.kind in {"model_raw", "archive", "checkpoint", "assistant_reasoning"}
                 or event.sensitivity == "internal"
             ]
             if blocked:

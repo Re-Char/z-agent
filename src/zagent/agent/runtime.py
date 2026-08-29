@@ -40,6 +40,8 @@ class _RoundState:
     cache_hit: int = 0
     cache_miss: int = 0
     latest_usage: Optional[Dict[str, Any]] = None
+    tool_evidence: list[Dict[str, Any]] = field(default_factory=list)
+    checkpoint: Optional[Dict[str, Any]] = None
     started: float = field(default_factory=time.monotonic)
 
     def record(self, usage: Optional[Dict[str, Any]]) -> None:
@@ -93,7 +95,7 @@ class AgentRuntime:
         )
         state = _RoundState()
         while True:
-            response = self._complete_round(session_id, state)
+            response = self._complete_round(session_id, user_event.event_id, state)
             state.record(response.usage)
             self._store_raw(session_id, user_event.event_id, response)
             if not response.tool_calls:
@@ -111,7 +113,7 @@ class AgentRuntime:
         )
         state = _RoundState()
         while True:
-            self._check_deadline(state)
+            self._check_deadline(session_id, user_event.event_id, state)
             response: Optional[ModelResponse] = None
             suppress_round = False  # tool-call rounds forward no deltas
             for event in self._provider.complete_stream(
@@ -139,14 +141,21 @@ class AgentRuntime:
 
     # --- shared round machinery ----------------------------------------------
 
-    def _complete_round(self, session_id: str, state: _RoundState) -> ModelResponse:
-        self._check_deadline(state)
+    def _complete_round(
+        self, session_id: str, parent_event_id: str, state: _RoundState
+    ) -> ModelResponse:
+        self._check_deadline(session_id, parent_event_id, state)
         working_set = self._context.build_working_set(session_id)
         return self._provider.complete(working_set.messages, self._tools.schemas)
 
-    def _check_deadline(self, state: _RoundState) -> None:
+    def _check_deadline(
+        self, session_id: str, parent_event_id: str, state: _RoundState
+    ) -> None:
         if time.monotonic() - state.started > self._limits.task_timeout_seconds:
-            raise AgentLimitError("agent task deadline exceeded")
+            checkpoint = self._create_checkpoint(
+                session_id, parent_event_id, state, "task_timeout", []
+            )
+            raise AgentLimitError("任务超过本轮时间上限，已保存可恢复 checkpoint", checkpoint)
 
     def _store_raw(self, session_id: str, parent_event_id: str, response: ModelResponse) -> None:
         if response.raw is not None:
@@ -169,6 +178,7 @@ class AgentRuntime:
             session_id, "message", "assistant", response.content,
             parent_event_id=parent_event_id, provenance="model",
         )
+        self._store.resolve_active_checkpoint(session_id, final_event.event_id)
         return AgentResult(
             final_event=final_event,
             working_set=self._context.build_working_set(session_id),
@@ -180,9 +190,16 @@ class AgentRuntime:
     def _run_tool_round(
         self, session_id: str, parent_event_id: str, response: ModelResponse, state: _RoundState
     ) -> None:
+        if state.tool_rounds >= self._limits.max_tool_rounds:
+            pending = [
+                {"call_id": call.call_id, "tool": call.name}
+                for call in response.tool_calls
+            ]
+            checkpoint = self._create_checkpoint(
+                session_id, parent_event_id, state, "max_tool_rounds", pending
+            )
+            raise AgentLimitError("已达到本轮工具调用上限，已保存可恢复 checkpoint", checkpoint)
         state.tool_rounds += 1
-        if state.tool_rounds > self._limits.max_tool_rounds:
-            raise AgentLimitError("maximum tool rounds exceeded")
         call_payload = {
             "content": response.content,
             "tool_calls": [
@@ -203,8 +220,65 @@ class AgentRuntime:
                 result = self._tools.execute(session_id, call.name, call.arguments)
             except Exception as exc:
                 result = {"ok": False, "error": str(exc), "tool": call.name}
-            self._store.append_event(
+            result_event = self._store.append_event(
                 session_id, "tool_result", "tool", result,
                 tool_name=call.name, tool_call_id=call.call_id,
                 provenance="local-tool-runtime",
             )
+            evidence: Dict[str, Any] = {
+                "call_id": call.call_id,
+                "tool": call.name,
+                "tool_result_event_id": result_event.event_id,
+                "ok": not isinstance(result, dict) or result.get("ok") is not False,
+            }
+            if isinstance(result, dict):
+                if isinstance(result.get("path"), str):
+                    evidence["path"] = result["path"]
+                if isinstance(result.get("sha256"), str):
+                    evidence["sha256"] = result["sha256"]
+                if result.get("error"):
+                    evidence["error"] = str(result["error"])[:300]
+            state.tool_evidence.append(evidence)
+
+    def _create_checkpoint(
+        self,
+        session_id: str,
+        parent_event_id: str,
+        state: _RoundState,
+        reason: str,
+        pending: list[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        if state.checkpoint is not None:
+            return state.checkpoint
+        objective_event = self._store.get_event(parent_event_id)
+        objective = objective_event.payload if isinstance(objective_event.payload, str) else str(
+            objective_event.payload
+        )
+        latest_archive = self._store.latest_archive(session_id)
+        files = [
+            {
+                "path": item["path"],
+                "sha256": item["sha256"],
+                "evidence_event_id": item["tool_result_event_id"],
+            }
+            for item in state.tool_evidence
+            if item.get("path") and item.get("sha256")
+        ]
+        checkpoint_state = {
+            "schema_version": 1,
+            "status": "paused",
+            "objective": objective[:4000],
+            "objective_event_id": parent_event_id,
+            "completed": list(state.tool_evidence),
+            "pending": pending,
+            "file_versions": files,
+            "tool_rounds_completed": state.tool_rounds,
+            "last_sequence": self._store.session_stats(session_id)["latest"],
+            "recoverable_archive_id": latest_archive["archive_id"] if latest_archive else None,
+            "failure_reason": reason,
+            "suggested_next_step": "继续任务前先根据 event ID 核对已完成工具结果和文件 SHA，再执行待办项。",
+        }
+        state.checkpoint = self._store.create_checkpoint(
+            session_id, parent_event_id, reason, checkpoint_state
+        )
+        return state.checkpoint

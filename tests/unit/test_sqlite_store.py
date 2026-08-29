@@ -1,4 +1,6 @@
 import hashlib
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 
 import pytest
 
@@ -17,6 +19,59 @@ def test_append_event_preserves_hash_and_sequence(store, session_id):
     assert (first.sequence, second.sequence) == (1, 2)
     assert first.payload_sha256 == hashlib.sha256("第一条".encode()).hexdigest()
     assert store.get_event(first.event_id).payload == "第一条"
+
+
+def test_context_version_persists_and_is_visible_across_store_instances(tmp_path):
+    from zagent.storage.sqlite_store import SqliteStore
+
+    data_dir = tmp_path / "data"
+    writer = SqliteStore(str(data_dir))
+    reader = None
+    reopened = None
+    try:
+        session_id = writer.create_session("持久化版本")["session_id"]
+        reader = SqliteStore(str(data_dir))
+        assert writer.context_version(session_id) == 0
+        assert reader.context_version(session_id) == 0
+
+        writer.append_event(session_id, "message", "user", "跨进程失效")
+        assert writer.context_version(session_id) == 1
+        assert reader.context_version(session_id) == 1
+
+        writer.close()
+        writer = None
+        reopened = SqliteStore(str(data_dir))
+        assert reopened.context_version(session_id) == 1
+    finally:
+        if writer is not None:
+            writer.close()
+        if reader is not None:
+            reader.close()
+        if reopened is not None:
+            reopened.close()
+
+
+def test_shared_connection_serializes_parallel_renderer_reads(store, session_id):
+    for index in range(8):
+        store.append_event(session_id, "message", "user", f"并发事件 {index}")
+    barrier = Barrier(12)
+
+    def read_repeatedly(worker: int) -> int:
+        barrier.wait()
+        for iteration in range(60):
+            selector = (worker + iteration) % 4
+            if selector == 0:
+                assert store.get_session(session_id)["event_count"] == 8
+            elif selector == 1:
+                assert len(store.list_events(session_id)) == 8
+            elif selector == 2:
+                assert store.context_version(session_id) == 8
+            else:
+                assert len(store.recent_active_events(session_id, 4)) == 4
+        return worker
+
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        assert sorted(pool.map(read_repeatedly, range(12))) == list(range(12))
 
 
 def test_large_payload_round_trips_through_blob(store, session_id):
@@ -47,6 +102,30 @@ def test_archive_preserves_source_ids(store, session_id):
     summary = store.get_event(archive["summary_event_id"])
     assert summary.payload["source_event_ids"] == [first.event_id, second.event_id]
     assert store.latest_archive(session_id)["state"]["goal"] == "测试"
+
+
+def test_checkpoint_is_atomic_addressable_and_persistent(store, session_id):
+    trigger = store.append_event(session_id, "message", "user", "完成长任务")
+    before = store.context_version(session_id)
+    checkpoint = store.create_checkpoint(
+        session_id,
+        trigger.event_id,
+        "max_tool_rounds",
+        {
+            "schema_version": 1,
+            "status": "paused",
+            "completed": [{"tool_result_event_id": "evt_evidence"}],
+            "pending": [{"tool": "fs_read"}],
+        },
+    )
+
+    assert checkpoint["checkpoint_id"].startswith("chk_")
+    assert store.context_version(session_id) == before + 1
+    event = store.get_event(checkpoint["checkpoint_event_id"])
+    assert event.kind == "checkpoint"
+    assert event.parent_event_id == trigger.event_id
+    assert event.payload["state"]["status"] == "paused"
+    assert store.latest_checkpoint(session_id)["state"]["pending"][0]["tool"] == "fs_read"
 
 
 def test_archive_rejects_fully_archived_range(store, session_id):
@@ -108,6 +187,9 @@ def test_v1_database_migrates_to_workspace_schema(tmp_path):
     store = SqliteStore(str(tmp_path / "data"))
     try:
         assert store.get_session("ses_old")["session_id"] == "ses_old"
+        assert store.context_version("ses_old") == 0
+        store.append_event("ses_old", "message", "user", "迁移后仍可失效缓存")
+        assert store.context_version("ses_old") == 1
         assert len(store.list_workspaces()) == 1
         assert store.list_sessions()[0]["title"] == "旧会话"
     finally:
