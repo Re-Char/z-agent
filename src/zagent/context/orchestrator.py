@@ -8,14 +8,21 @@ from pydantic import ValidationError as PydanticValidationError
 from zagent.domain.errors import ToolExecutionError
 from zagent.storage.sqlite_store import SqliteStore
 
+from .retrieval import HybridRetriever
 from .tool_arguments import CONTEXT_ARGUMENT_TYPES, StrictArgs, context_tool_schemas
 from .working_set import WorkingSetBuilder
 
 
 class ContextOrchestrator:
-    def __init__(self, store: SqliteStore, working_sets: WorkingSetBuilder) -> None:
+    def __init__(
+        self,
+        store: SqliteStore,
+        working_sets: WorkingSetBuilder,
+        retriever: HybridRetriever | None = None,
+    ) -> None:
         self._store = store
         self._working_sets = working_sets
+        self._retriever = retriever or HybridRetriever(store)
 
     @property
     def tool_schemas(self) -> list[dict]:
@@ -64,7 +71,7 @@ class ContextOrchestrator:
                 "pinned_tokens": working_set.pinned_tokens,
             }
         if tool_name == "context_search":
-            return {"results": self._store.search_events(session_id, values["query"], values["limit"])}
+            return {"results": self._retriever.search(session_id, values["query"], values["limit"])}
         if tool_name == "context_retrieve":
             return {"events": self._retrieve(session_id, values["event_ids"], values["max_chars"])}
         if tool_name == "context_archive":

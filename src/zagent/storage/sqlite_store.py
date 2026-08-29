@@ -300,6 +300,18 @@ class SqliteStore:
         ).fetchall()
         return [self._to_event(row) for row in reversed(rows)]
 
+    def list_searchable_events(self, session_id: str, limit: int = 1000) -> List[EventRecord]:
+        """Return a bounded recent corpus for non-persistent vector retrieval."""
+        self.get_session(session_id)
+        rows = self._db.execute(
+            """SELECT * FROM events
+               WHERE session_id=? AND sensitivity!='internal'
+                 AND kind NOT IN ('model_raw', 'assistant_reasoning')
+               ORDER BY sequence DESC LIMIT ?""",
+            (session_id, max(1, min(limit, 5000))),
+        ).fetchall()
+        return [self._to_event(row) for row in rows]
+
     def search_events(self, session_id: str, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         self.get_session(session_id)
         terms = searchable_text(query).split()

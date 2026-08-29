@@ -58,7 +58,7 @@ CONTEXT_ARGUMENT_TYPES: Dict[str, Type[StrictArgs]] = {
 
 CONTEXT_TOOL_DESCRIPTIONS = {
     "context_status": "查看当前上下文预算、事件和归档状态",
-    "context_search": "搜索当前会话的历史原文，返回稳定 event_id",
+    "context_search": "用中文 BM25 与本地稀疏向量混合搜索历史原文，返回稳定 event_id",
     "context_retrieve": "通过稳定 event_id 分页取回原文",
     "context_archive": "结束一个已完成阶段，归档事件并更新结构化任务状态",
     "context_pin": "把关键证据固定到工作上下文",
@@ -78,4 +78,3 @@ def context_tool_schemas() -> List[dict]:
         }
         for name, argument_type in CONTEXT_ARGUMENT_TYPES.items()
     ]
-

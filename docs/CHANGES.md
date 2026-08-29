@@ -90,9 +90,16 @@
 - 固定证据提示改为“跨归档优先保留，超过真实上下文硬上限会警告”，不再暗示无限保留
 - 架构文档区分当前的显式归档/硬预算裁剪与尚未实现的自动保护性归档，消除实现状态的过度承诺
 
+### 11. 无训练混合向量召回
+- 新增 `HybridRetriever`：SQLite FTS5/BM25 + 中文稀疏 TF-IDF 向量 + RRF 融合
+- 稀疏向量包含 CJK 单字低权重、2/3-gram、规范化词片段与路径/代码标识符分量；无需训练、模型下载、NumPy 或向量数据库
+- exact phrase 最终排序保护，结果暴露 `channels`、`fusion_score`、双路 rank 和 vector similarity，便于审计
+- 向量通道只读取最近 1000 个非敏感事件；内部响应和 Thinking 不参与向量化，FTS5 保持全历史回退
+- 数据库持久化向量索引、稠密多语 embedding 和长期记忆明确进入 `docs/v2-roadmap.md`
+
 ## 验证状态
 
-- Python：**110 个测试通过**，覆盖率 **83.86%**（门槛 80%）
+- Python：**114 个测试通过**，覆盖率 **84.57%**（门槛 80%）
 - 前端：**7 个 Vitest 测试** + strict typecheck + Vite production build 全绿
 - E2E（真实 DeepSeek）：读文件 → 流式输出 → 折叠展示 → 归档/固定 → 无 400/500
 - 详细验证记录：`docs/verification-report.md`（9 轮迭代逐项记录）

@@ -34,7 +34,9 @@ def main(argv: Optional[list[str]] = None) -> None:
         elif args.command == "events":
             result = [event.to_dict() for event in container.store.list_events(args.session_id)]
         else:
-            result = container.store.search_events(args.session_id, args.query)
+            result = container.context.execute(
+                args.session_id, "context_search", {"query": args.query, "limit": 10}
+            )["results"]
         print(json.dumps(result, ensure_ascii=False, indent=2))
     finally:
         container.close()
@@ -42,4 +44,3 @@ def main(argv: Optional[list[str]] = None) -> None:
 
 if __name__ == "__main__":
     main()
-

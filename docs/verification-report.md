@@ -326,3 +326,14 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - Python 覆盖率 83.86%，高于 80% 门槛。
 - Vite production build 通过：JS 300.68KB（gzip 95.81KB），CSS 20.26KB（gzip 5.46KB）。
 - 新增覆盖：归档外置/固定恢复/原文检索取回、重复固定计费、跨会话批量固定原子性、重复归档拒绝、工具轮裁剪后 token 重算、工作区缓存失效、前端归档指标展示、API 契约。
+
+## 15. 混合向量召回复验（第十一轮，2026-08-29）
+
+- `context_search` 与 CLI search 统一经过 `HybridRetriever`。
+- lexical 通道：SQLite FTS5/BM25、完整短语和既有中文字符/双字词索引。
+- vector 通道：查询时构造的本地稀疏 TF-IDF，包含 CJK 2/3-gram、低权重单字和技术标识符分量。
+- 排序：RRF 融合两路名次，exact phrase 保持最终优先；返回结果包含 channels、双路 rank、fusion score 与 cosine similarity。
+- 安全：只向量化最近 1000 个非敏感事件；内部 provider payload 和 Thinking 被排除；FTS5 继续覆盖全历史。
+- 性能抽查：临时 SQLite 中 1000 条中文事件的单次混合检索约 38ms（本机开发环境，不作为跨设备 SLA）。
+- 自动化：114 个 Python 测试、7 个 UI 测试、Ruff 和 TypeScript typecheck 全绿；Python 覆盖率 84.57%。
+- v2 边界：数据库级 context version、持久化稠密向量索引和长期记忆见 `docs/v2-roadmap.md`，本轮未提前实现。

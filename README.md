@@ -5,7 +5,7 @@ Z-Agent 是一个中文优先、可审计的本地长程智能体。v1 自行实
 ## v1 能力
 
 - 追加式 SQLite EventLog，大输出进入内容寻址 BlobStore；
-- `context_status/search/retrieve/archive/pin/unpin` 原生上下文工具；
+- `context_status/search/retrieve/archive/pin/unpin` 原生上下文工具；中文搜索融合 FTS5/BM25 与本地稀疏 TF-IDF 向量，无需训练或向量数据库；
 - 中文字符 unigram/bigram + 技术标识符的确定性混合检索；若环境安装 Jieba 会自动增加词级召回；
 - OpenAI-compatible 模型网关，可配置 Qwen、DeepSeek、GLM、Kimi、MiniMax 等国产模型；
 - 自研 tool-calling 循环、参数校验、最大轮次、任务超时和错误事件；

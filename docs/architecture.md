@@ -76,7 +76,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 - `payload_sha256` 支持重放与审计；`parent_event_id` 维护压缩/派生关系。
 - 原始工具输出从不被摘要覆盖。摘要也是事件，并以 `source_event_ids` 指向原始证据。
 
-推荐首版：SQLite（WAL 模式）+ 本地 blob 目录；向量索引不是必需项，先用 FTS5、时间范围、工具名和标签过滤。
+首版采用 SQLite（WAL 模式）+ 本地 blob 目录；FTS5 保留全历史精确检索，本地稀疏向量在查询时对有界候选集计算，不需要持久化向量索引。
 
 ### 4.2 WorkingSet（模型可见上下文）
 
@@ -118,7 +118,9 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 
 ### 4.5 Evidence Index 与 Evidence Pack
 
-`context_search` 优先采用可解释检索：FTS5、事件类型、时间、工具名、任务阶段、固定标签。之后可选加入 embedding 混合召回。
+`context_search` 当前采用两路可解释召回：SQLite FTS5/BM25，以及查询时构造的中文字符/词片段稀疏 TF-IDF 向量；两路通过 RRF 融合，完整短语命中拥有最终排序保护。向量通道只扫描最近的有界非敏感事件，不写入数据库；FTS5 仍负责全历史精确召回。
+
+真正的中文/多语稠密 embedding、向量索引持久化和长期记忆写入策略属于 v2，见 [v2-roadmap.md](v2-roadmap.md)。
 
 `Evidence Pack` 将多个命中组织为带引用的小型证据包：
 
@@ -197,7 +199,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 | EventLog + SQLite/BlobStore | 常规本地存储工程，不依赖外部 Agent 数据模型 | 迁移与磁盘增长 | 高 |
 | 工作集投影与稳定事件引用 | Prompt Builder 的局部重构 | token 估算误差 | 高 |
 | `context_*` 工具与 Agent 主动归档 | ACM 的推理时核心，无需训练 | 模型可能不主动使用工具 | 高；用 tool instruction + 硬阈值保护 |
-| FTS5 精确检索 | 无额外模型/服务依赖 | 语义召回有限 | 高；首版足够 |
+| FTS5 + 稀疏向量融合 | 无额外模型/服务依赖，兼顾精确词与局部短语变体 | 不能替代真正的同义语义 embedding | 高；v1 已实现 |
 | 子 Agent 最小上下文委托 | 有明确 task anchor/evidence 模型 | 初期需调整委托 prompt | 高 |
 
 ### 8.2 需要实验验证：中等可行性
@@ -322,9 +324,10 @@ tool_policy:
 | --- | --- | --- |
 | Exact / metadata | event ID、文件路径、命令、工具名、时间过滤 | 不做语言处理，保证可重现 |
 | Lexical BM25 | 用户问题、摘要、终端文本 | Jieba/THULAC 可配置分词 + 原始字符 2-gram 双字段 |
-| Semantic（可选） | 同义表达和中英混合语义召回 | 只使用经过中文/多语验证的 embedding provider，保留 lexical 结果作证据 |
+| Sparse vector（v1） | 短语变体、局部重叠和长度归一化 | 本地 TF-IDF、CJK 2/3-gram、技术标识符分量，无训练、无数据外发 |
+| Dense semantic（v2） | 同义表达和中英混合语义召回 | 只使用经过中文/多语验证的 embedding provider，保留 lexical 结果作证据 |
 
-排序采用 RRF（Reciprocal Rank Fusion）融合，不让 embedding 单独决定证据。对于“银行卡号、产品名、代码标识符、法律条款、路径”等精确词，exact 命中优先于语义相似度。
+v1 排序采用 RRF（Reciprocal Rank Fusion）融合 BM25 与稀疏向量结果，不让向量通道单独决定证据。对于“银行卡号、产品名、代码标识符、法律条款、路径”等精确词，exact 命中优先于向量相似度。
 
 archive 摘要使用中文字段名和短句，但固定保留：原始 event 范围、关键原文引用、未决问题、决策依据、命令/文件路径和英文技术术语。不可把中文“润色”放在原始日志之前；原文永远是事实源。
 
@@ -573,12 +576,12 @@ v1 合并门槛：
 | --- | --- | --- |
 | 自研 Agent loop | 已实现 | 自行完成输出解析、本地工具调度、轮次/截止时间终止和错误映射，不依赖 Agent SDK |
 | EventLog / BlobStore | 已实现 | SQLite WAL、追加式事件、稳定 ID、SHA-256 与大内容外置 |
-| WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 unigram/bigram 检索无需训练 |
+| WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 BM25 + 稀疏 TF-IDF 向量融合无需训练 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
 | 工作区代码工具 | 已实现 | 安全读取/检索、SHA-256 版本锁写入与精确替换；敏感文件、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
 | 扩展生态 | 已实现发现与校验 | 校验 Z-Agent manifest、integrity 与 MCP 配置；扩展进程执行和 marketplace 安装留待 v1.2 |
-| 测试 | 已实现 | 110 个 Python 单元/集成/功能测试，7 个前端交互/Markdown 测试，类型检查、生产构建与 Electron DMG 开发产物 |
+| 测试 | 已实现 | 114 个 Python 单元/集成/功能测试，7 个前端交互/Markdown 测试，类型检查、生产构建与 Electron DMG 开发产物 |
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key；自动执行第三方扩展在权限 broker 和隔离 host 完成前保持关闭。
 
