@@ -28,7 +28,7 @@
 - Python 覆盖率 84.79%，高于 80% 门槛；
 - Ruff、TypeScript strict typecheck、Vite production build 通过；
 - Electron `main.cjs` / `preload.cjs` 语法检查通过；
-- electron-builder 生成 `dist/desktop/Z-Agent-0.1.0-arm64.dmg`；
+- electron-builder 生成 `dist/desktop/Z-Agent-0.1.1-arm64.dmg`；
 - 已知非功能警告：Starlette TestClient 的 httpx 兼容层弃用提示。
 
 ## 3. 真实 DeepSeek 长程验收
