@@ -49,6 +49,13 @@ def test_archive_preserves_source_ids(store, session_id):
     assert store.latest_archive(session_id)["state"]["goal"] == "测试"
 
 
+def test_archive_rejects_fully_archived_range(store, session_id):
+    store.append_event(session_id, "message", "user", "开始")
+    store.create_archive(session_id, 1, 1, "完成", {"stage": "done"})
+    with pytest.raises(ValidationError, match="already archived"):
+        store.create_archive(session_id, 1, 1, "重复归档", {"stage": "done"})
+
+
 def test_unknown_session_raises_not_found(store):
     with pytest.raises(NotFoundError):
         store.list_events("ses_missing")

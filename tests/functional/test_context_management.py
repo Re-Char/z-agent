@@ -30,6 +30,32 @@ def test_archive_summary_and_state_reach_system_prompt(store, session_id):
     assert archive["archive_id"] in system_prompt
 
 
+def test_archive_externalizes_sources_but_keeps_pin_and_retrieval(store, session_id):
+    """Archive compacts the active projection without deleting the event log."""
+    first = store.append_event(session_id, "message", "user", "不可丢失的最初约束")
+    middle = store.append_event(session_id, "message", "assistant", "阶段过程细节")
+    last = store.append_event(session_id, "message", "user", "阶段收尾确认")
+    store.pin_event(session_id, first.event_id, "核心约束")
+    store.create_archive(session_id, 1, 3, "阶段完成", {"stage": "done"})
+    after = store.append_event(session_id, "message", "user", "归档后的新问题")
+
+    context = ContextOrchestrator(store, WorkingSetBuilder(store, recent_event_limit=24))
+    working = context.build_working_set(session_id)
+    assert first.event_id in working.included_event_ids  # pinned source is added back
+    assert middle.event_id not in working.included_event_ids
+    assert last.event_id not in working.included_event_ids
+    assert after.event_id in working.included_event_ids
+
+    status = context.execute(session_id, "context_status", {})
+    assert status["archive_stats"]["count"] == 3
+    found = context.execute(session_id, "context_search", {"query": "阶段过程细节"})
+    assert found["results"][0]["event"]["event_id"] == middle.event_id
+    retrieved = context.execute(session_id, "context_retrieve", {
+        "event_ids": [middle.event_id], "max_chars": 256,
+    })
+    assert retrieved["events"][0]["payload"] == "阶段过程细节"
+
+
 def test_archive_event_never_breaks_tool_sequence(store, session_id):
     """Archive summaries must not land between assistant tool_calls and tool replies."""
     store.append_event(session_id, "message", "user", "开始")
@@ -137,3 +163,15 @@ def test_archive_injection_does_not_churn_system_prompt(store, session_id):
     assert before != after  # archive state is injected
     # a second build with no new archive is byte-stable again
     assert builder.build(session_id).messages[0]["content"] == after
+
+
+def test_workspace_path_change_invalidates_cached_system_prompt(store):
+    workspace = store.create_workspace("缓存测试", "")
+    session_id = store.create_session("会话", workspace["workspace_id"])["session_id"]
+    builder = WorkingSetBuilder(store)
+    before = builder.build(session_id)
+    assert "当前工作区未设置路径" in before.messages[0]["content"]
+    store.update_workspace(workspace["workspace_id"], path="/tmp/zagent-cache-test")
+    after = builder.build(session_id)
+    assert after is not before
+    assert "/tmp/zagent-cache-test" in after.messages[0]["content"]

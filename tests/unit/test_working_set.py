@@ -15,6 +15,18 @@ def test_working_set_excludes_raw_provider_payload(store, session_id, context):
     assert len(working.messages) == 1
 
 
+def test_legacy_internal_pin_is_never_injected(store, session_id, context):
+    internal = store.append_event(
+        session_id, "model_raw", "system", {"provider_secret": "never expose"},
+        sensitivity="internal",
+    )
+    store.pin_event(session_id, internal.event_id, "模拟旧数据库脏数据")
+    working = context.build_working_set(session_id)
+    assert internal.event_id not in working.included_event_ids
+    assert internal.event_id in working.dropped_pinned_ids
+    assert "never expose" not in str(working.messages)
+
+
 def test_working_set_excludes_archive_summary_from_conversation(store, session_id, context):
     # Archive summaries must not appear as mid-conversation "system" messages:
     # after an assistant tool_calls message, providers only accept tool replies.
@@ -22,11 +34,12 @@ def test_working_set_excludes_archive_summary_from_conversation(store, session_i
     store.append_event(session_id, "assistant_tool_calls", "assistant", {
         "content": "", "tool_calls": [{"call_id": "call_1", "name": "context_archive", "arguments": {}}]
     })
-    store.create_archive(session_id, 1, 2, "阶段完成", {"stage": "done"})
+    # Archive the completed source range, not the currently executing tool call.
+    store.create_archive(session_id, 1, 1, "阶段完成", {"stage": "done"})
     store.append_event(session_id, "tool_result", "tool", {"archive_id": "arc_x"}, tool_call_id="call_1")
     messages = context.build_working_set(session_id).messages
     roles = [message["role"] for message in messages]
-    assert roles == ["system", "user", "assistant", "tool"]
+    assert roles == ["system", "assistant", "tool"]
     # The tool reply is directly after the tool_calls message — no intermediate
     # system/archive summary in between.
     tool_calls_index = roles.index("assistant")
@@ -124,6 +137,26 @@ def test_truncation_never_splits_tool_rounds(store, session_id):
             assert ok  # all replies, or the whole round was dropped
     # The kept window must not end on an orphan tool message
     assert roles[-1] != "tool"
+
+
+def test_token_stats_are_recomputed_after_dropping_broken_tool_round(store, session_id):
+    from zagent.context.tokenization import estimate_tokens
+    from zagent.context.working_set import WorkingSetBuilder
+
+    user = store.append_event(session_id, "message", "user", "保留消息")
+    broken = store.append_event(session_id, "assistant_tool_calls", "assistant", {
+        "content": "", "tool_calls": [
+            {"call_id": "missing_reply", "name": "context_status", "arguments": {}}
+        ],
+    })
+    store.pin_event(session_id, broken.event_id, "即使固定也不能保留坏轮次")
+    builder = WorkingSetBuilder(store, context_window=4096)
+    working = builder.build(session_id)
+    assert broken.event_id not in working.included_event_ids
+    assert broken.event_id in working.dropped_pinned_ids
+    expected = estimate_tokens(working.messages[0]["content"]) + user.token_estimate + 8
+    assert working.token_estimate == expected
+    assert working.pinned_tokens == 0
 
 
 

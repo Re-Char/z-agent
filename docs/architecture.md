@@ -82,13 +82,13 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 
 `WorkingSet` 是每次 LLM 调用前临时构造的、受 token 预算限制的视图：
 
-1. 稳定系统提示词、权限和工具 schema；
-2. 当前任务锚点（目标、约束、已确认结果、未决问题）；
-3. 最近对话尾部；
-4. 被 Agent 主动检索或由确定性策略选中的 Evidence Pack；
-5. 少量事件地址与可用 context tool 使用说明。
+1. 稳定系统提示词、工作区权限和 context tool 使用说明；
+2. 最近一次归档的结构化任务状态与 archive ID；
+3. `context_pin` 固定的关键事件（跨归档优先保留）；
+4. 尚未归档的最近对话尾部；
+5. 完整的工具调用轮次（caller 与全部 tool result 要么一起保留，要么一起移除）。
 
-它不等同于完整聊天记录。构造器会优先保留当前任务和未完成工具调用的因果链，超预算时移除低优先级证据，但不会修改 EventLog。
+它不等同于完整聊天记录。构造器按 `context_version` 缓存相同投影；事件追加、固定、取消固定、归档或工作区路径变化都会使缓存失效。普通事件只能使用软预算，固定证据可以使用软预算与模型真实窗口之间的余量，但不能突破硬上限。任何裁剪都只改变投影，不会修改 EventLog。
 
 ### 4.3 Context Orchestrator（运行时控制面）
 
@@ -98,9 +98,10 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 - 估算 WorkingSet token，用硬上限保护主模型；
 - 暴露 Context Tool schema；
 - 生成可追踪的 evidence pack；
-- 当 Agent 没有主动归档但接近硬上限时执行**保护性归档**，绝不丢弃原文。
+- 归档后将覆盖区间从活动 WorkingSet 外置，同时保留 EventLog 原文；
+- 在接近上限时执行确定性裁剪，并通过 `context_status` 暴露占用和固定证据警告。
 
-保护性归档不是传统 summary replacement：它创建一个“状态快照 + 事件范围”的可展开节点，并在下一轮提示 Agent 检查该节点。
+当前版本不会在没有可靠结构化状态时自动生成“保护性摘要”。归档由模型或用户显式触发；若模型没有归档，硬预算仍能避免请求超过 provider 上下文窗口，但被裁剪的旧事件需要通过 `context_search` / `context_retrieve` 找回。自动归档属于后续策略层能力，不能在实现前标记为完成。
 
 ### 4.4 Agent-facing Context Tools
 
@@ -171,7 +172,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 ### Phase 1：独立 Agent 核心（v1 已完成）
 
 - 接入会话写入、Prompt Builder 和 `context_status/search/retrieve/archive`。
-- 默认采用“显式 Agent 操作 + 硬阈值保护性归档”。
+- 默认采用“显式 Agent 归档 + 确定性硬预算裁剪”；自动保护性归档仍是后续项。
 - 增加显式轮次/截止时间限制和可审计错误事件。
 - 交付：可运行的长任务 Agent、端到端测试、可观测日志。
 
@@ -566,18 +567,18 @@ v1 合并门槛：
 
 ## 19. v1 实现状态
 
-截至 2026-08-28，仓库已实现可运行的 v1 基线：
+截至 2026-08-29，仓库已实现可运行的 v1 基线：
 
 | 能力 | 状态 | 说明 |
 | --- | --- | --- |
 | 自研 Agent loop | 已实现 | 自行完成输出解析、本地工具调度、轮次/截止时间终止和错误映射，不依赖 Agent SDK |
 | EventLog / BlobStore | 已实现 | SQLite WAL、追加式事件、稳定 ID、SHA-256 与大内容外置 |
-| WorkingSet / context tools | 已实现 | 状态、检索、展开、归档、固定/取消固定；中文 unigram/bigram 检索无需训练 |
+| WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 unigram/bigram 检索无需训练 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
 | 工作区代码工具 | 已实现 | 安全读取/检索、SHA-256 版本锁写入与精确替换；敏感文件、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
 | 扩展生态 | 已实现发现与校验 | 校验 Z-Agent manifest、integrity 与 MCP 配置；扩展进程执行和 marketplace 安装留待 v1.2 |
-| 测试 | 已实现 | 102 个 Python 单元/集成/功能测试，6 个前端交互/Markdown 测试，类型检查、生产构建与 Electron DMG 开发产物 |
+| 测试 | 已实现 | 110 个 Python 单元/集成/功能测试，7 个前端交互/Markdown 测试，类型检查、生产构建与 Electron DMG 开发产物 |
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key；自动执行第三方扩展在权限 broker 和隔离 host 完成前保持关闭。
 

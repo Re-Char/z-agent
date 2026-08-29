@@ -54,6 +54,8 @@ CREATE TABLE IF NOT EXISTS archives (
     state_json TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_archives_session_range
+    ON archives(session_id, start_sequence, end_sequence);
 """
 
 # Best-effort migrations for databases created before the v2 schema.

@@ -59,6 +59,27 @@ describe("Z-Agent desktop UI", () => {
     await waitFor(() => expect(screen.queryByText("先连接项目目录")).not.toBeInTheDocument());
   });
 
+  it("shows archive compaction metrics in the context inspector", async () => {
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "归档任务", updated_at: new Date().toISOString(), event_count: 4 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [] };
+      if (path === "/v1/sessions/s1/context") return {
+        stats: { count: 4, tokens: 320 },
+        working_set: { tokens: 40, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 },
+        latest_archive: { archive_id: "arc_test", start_sequence: 1, end_sequence: 3, state: { goal: "完成阶段" } },
+        archive_stats: { count: 3, tokens: 280 }, pinned_tokens: 0,
+      };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("arc_test")).toBeInTheDocument());
+    expect(screen.getByText(/已外置 3 个事件（约 280 tokens）/)).toBeInTheDocument();
+    expect(screen.getByText(/原文仍可检索和按 event ID 取回/)).toBeInTheDocument();
+  });
+
   it("lets the user stop an active stream without showing an error", async () => {
     let finishStream: ((value: { type: string }) => void) | undefined;
     let cancelled = false;

@@ -61,6 +61,11 @@
 - **工作集缓存**：store 维护 per-session `context_version`（append/pin/unpin/archive 递增），builder 按版本缓存
 - **检索排序**：强 token（词/bigram/技术符号）与单字分级加权，完整短语命中 -50 置顶
 - 事件时间/会话相对时间显示、工作集列表可取消固定
+- **归档真正压缩活动投影**：archive 覆盖区间不再进入最近事件尾部；固定事件会跨归档加回，原事件仍保留在 EventLog 并可搜索/取回
+- **批量固定原子化**：事件去重、跨会话预校验、重复固定不重复计费，整批一次写入/失效缓存
+- **统计修正**：裁掉不完整工具轮后重新计算工作集和固定 token；`context_status.archive_stats` 暴露已外置事件数与 token
+- **缓存边界修正**：工作区路径变化会使关联会话的 system prompt 缓存失效
+- **内部事件防注入**：`model_raw`、思考过程、archive 摘要和 `sensitivity=internal` 事件在 pin 入口被拒绝；WorkingSet 对旧库脏 pin 再做一次排除
 
 ### 7. Markdown 渲染
 - `apps/ui/src/Markdown.tsx`：`marked` + `DOMPurify`（防 XSS），assistant 消息渲染；代码块语言栏、复制按钮、表格横向滚动和安全外链
@@ -80,10 +85,15 @@
 - OpenAI-compatible provider 对网络错误、429 和 5xx 做有限指数退避；400 等客户端配置错误不重试，直接展示服务端原因。
 - Electron 固定为 `44.0.0`，electron-builder 可生成 macOS arm64 DMG。
 
+### 10. 归档语义与检查器可观测性
+- Context Inspector 的归档卡片显示已外置事件数与估算 token，并明确“结构化状态进入系统提示词、原文按 event ID 恢复”
+- 固定证据提示改为“跨归档优先保留，超过真实上下文硬上限会警告”，不再暗示无限保留
+- 架构文档区分当前的显式归档/硬预算裁剪与尚未实现的自动保护性归档，消除实现状态的过度承诺
+
 ## 验证状态
 
-- Python：**102 个测试通过**，覆盖率 **83.63%**（门槛 80%）
-- 前端：**6 个 Vitest 测试** + strict typecheck + Vite production build 全绿
+- Python：**110 个测试通过**，覆盖率 **83.86%**（门槛 80%）
+- 前端：**7 个 Vitest 测试** + strict typecheck + Vite production build 全绿
 - E2E（真实 DeepSeek）：读文件 → 流式输出 → 折叠展示 → 归档/固定 → 无 400/500
 - 详细验证记录：`docs/verification-report.md`（9 轮迭代逐项记录）
 

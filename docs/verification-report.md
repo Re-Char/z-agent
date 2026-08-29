@@ -307,3 +307,22 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - 1440×900：侧栏 248px、主区 884px、检查器 308px，总宽精确等于 viewport，无横向溢出。
 - 1024×768：检查器默认移出视口，点击“上下文”后成为 330px 抽屉；页面 `scrollWidth` 等于 viewport。
 - 完成后已停止本次启动的 Vite、Electron 与 Core 进程。
+
+## 14. 上下文归档语义复验（第十轮，2026-08-29）
+
+### 14.1 发现与修正
+
+- 原实现的 archive 只写摘要与结构化状态，覆盖区间仍可能作为“最近事件”进入下一轮 WorkingSet；现改为覆盖区间从活动投影外置，真正降低后续 prompt 占用。
+- EventLog 原文没有删除：FTS5 搜索仍返回稳定 event ID，`context_retrieve` 仍按 ID 返回原 payload；固定事件会跨归档重新加入 WorkingSet。
+- 批量固定改为去重、跨会话预校验和单事务写入；重复固定不再重复计算 token，失败不会留下部分 pin。
+- 不完整工具轮被整体移除后重新统计 token，避免 inspector 显示裁剪前的虚高值。
+- 工作区路径变化现在会使关联会话的 system prompt 缓存失效。
+- Context Inspector 新增 archive 外置事件数/token，并澄清固定证据是“优先保留但不突破模型硬上限”。
+- 内部 provider 原始响应、思考事件与归档摘要不能被固定；WorkingSet 也会排除旧数据库中的内部脏 pin，避免敏感内部 payload 被重新注入模型。
+
+### 14.2 自动化结果
+
+- `npm test`：Ruff、110 个 Python 测试、7 个 UI 测试和 TypeScript strict typecheck 全部通过。
+- Python 覆盖率 83.86%，高于 80% 门槛。
+- Vite production build 通过：JS 300.68KB（gzip 95.81KB），CSS 20.26KB（gzip 5.46KB）。
+- 新增覆盖：归档外置/固定恢复/原文检索取回、重复固定计费、跨会话批量固定原子性、重复归档拒绝、工具轮裁剪后 token 重算、工作区缓存失效、前端归档指标展示、API 契约。

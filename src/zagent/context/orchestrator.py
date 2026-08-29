@@ -59,6 +59,7 @@ class ContextOrchestrator:
                 "stats": self._store.session_stats(session_id),
                 "working_set": working_set_data,
                 "latest_archive": self._store.latest_archive(session_id),
+                "archive_stats": self._store.archive_stats(session_id),
                 "warning": warning,
                 "pinned_tokens": working_set.pinned_tokens,
             }
@@ -82,22 +83,34 @@ class ContextOrchestrator:
             budget = self._working_sets.budget
             pin_budget = int(budget * 0.30)
             current = self._store.pinned_token_total(session_id)
+            unique_ids = list(dict.fromkeys(values["event_ids"]))
+            already_pinned = self._store.pinned_event_ids(session_id)
+            events = [self._store.get_event(event_id) for event_id in unique_ids]
+            if any(event.session_id != session_id for event in events):
+                raise ToolExecutionError("不能固定其他会话的事件")
+            blocked = [
+                event.event_id for event in events
+                if event.kind in {"model_raw", "archive", "assistant_reasoning"}
+                or event.sensitivity == "internal"
+            ]
+            if blocked:
+                raise ToolExecutionError("内部响应、思考过程和归档摘要不能固定到模型工作集")
             additional = sum(
-                self._store.get_event(event_id).token_estimate
-                for event_id in values["event_ids"]
+                event.token_estimate
+                for event in events
+                if event.event_id not in already_pinned
             )
             if current + additional > pin_budget:
                 raise ToolExecutionError(
                     f"固定证据 token 总量将超过预算的 30%（{pin_budget} tokens，"
                     f"当前 {current} + 新增 {additional}）。请先取消部分固定（context_unpin）再试。"
                 )
-            for event_id in values["event_ids"]:
-                self._store.pin_event(session_id, event_id, values["rationale"])
-            return {"pinned": values["event_ids"], "pinned_tokens": current + additional}
+            self._store.pin_events(session_id, unique_ids, values["rationale"])
+            return {"pinned": unique_ids, "pinned_tokens": current + additional}
         if tool_name == "context_unpin":
-            for event_id in values["event_ids"]:
-                self._store.unpin_event(session_id, event_id)
-            return {"unpinned": values["event_ids"]}
+            unique_ids = list(dict.fromkeys(values["event_ids"]))
+            self._store.unpin_events(session_id, unique_ids)
+            return {"unpinned": unique_ids}
         raise ToolExecutionError(f"unhandled context tool: {tool_name}")
 
     def _retrieve(self, session_id: str, event_ids: list[str], max_chars: int) -> list[dict]:

@@ -21,6 +21,7 @@ def test_api_session_message_and_context_flow(tmp_path):
             assert context.status_code == 200
             assert context.json()["stats"]["count"] >= 3
             assert context.json()["working_set"]["tokens"] > 0
+            assert context.json()["archive_stats"] == {"count": 0, "tokens": 0}
     finally:
         container.close()
 

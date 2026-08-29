@@ -3,7 +3,7 @@ import { Markdown } from "./Markdown";
 
 type Session = { session_id: string; title: string; updated_at: string; event_count: number };
 type Event = { event_id: string; sequence: number; timestamp: string; kind: string; role: string; payload: unknown; token_estimate: number; tool_name?: string };
-type ContextStatus = { stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; state: unknown }; warning?: string | null; pinned_tokens: number };
+type ContextStatus = { stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; archive_stats?: { count: number; tokens: number }; warning?: string | null; pinned_tokens: number };
 type ModelConfig = { id: string; name: string; provider: string; model: string; base_url: string; context_window: number; soft_limit_ratio: number; hard_limit_ratio: number };
 type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string };
 type TokenStats = { total_tokens: number; completion_tokens: number; cache_hit_tokens: number; cache_miss_tokens: number; cache_hit_rate: number; elapsed_seconds: number; tokens_per_second: number };
@@ -389,7 +389,7 @@ function App() {
       </div>
       <div className="stat-grid">
         <div title="事件 = 会话中的每一条记录：你的消息、模型回复、工具调用与结果、归档摘要等"><strong>{context?.stats.count || 0}</strong><span>事件</span></div>
-        <div title="固定证据 = 被你手动固定的关键事件，始终保留在工作集中，不会被预算挤出"><strong>{pinnedIds.size}</strong><span>固定证据</span></div>
+        <div title="固定证据 = 被你手动固定的关键事件，会跨归档优先保留；超过模型硬上限时会显示警告"><strong>{pinnedIds.size}</strong><span>固定证据</span></div>
         <div title={`缓存命中率 = 命中缓存 token / (命中 + 未命中)。命中越多，首 token 延迟与费用越低（最近一次任务）`}><strong>{lastStats ? `${lastStats.cache_hit_rate}%` : "—"}</strong><span>缓存命中</span></div>
         <div title={`生成速度 = 完成任务生成的总 token 数 ÷ 总耗时（最近一次任务）`}><strong>{lastStats ? lastStats.tokens_per_second.toFixed(1) : "—"}</strong><span>tok/s</span></div>
       </div>
@@ -411,7 +411,7 @@ function App() {
         ? <div className="archive-card">
             <code>{context.latest_archive.archive_id}</code>
             <pre>{JSON.stringify(context.latest_archive.state, null, 2)}</pre>
-            <p>归档摘要已注入系统提示词，模型在后续轮次仍能引用该阶段状态。</p>
+            <p>已外置 {context.archive_stats?.count ?? "—"} 个事件（约 {context.archive_stats?.tokens.toLocaleString() ?? "—"} tokens）。结构化状态已注入系统提示词；原文仍可检索和按 event ID 取回。</p>
           </div>
         : <p>模型在完成任务阶段后会调用归档工具，在这里留下任务状态摘要。你也可以通过对话要求"归档当前阶段"。</p>}</div>
     </aside>

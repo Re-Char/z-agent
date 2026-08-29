@@ -49,22 +49,25 @@ class WorkingSetBuilder:
 
     def _build(self, session_id: str) -> WorkingSet:
         recent = [
-            event for event in self._store.recent_events(session_id, self._recent_event_limit * 2)
+            event for event in self._store.recent_active_events(
+                session_id, self._recent_event_limit * 2
+            )
             if event.kind not in {"model_raw", "archive", "assistant_reasoning"}
         ][-self._recent_event_limit:]
+        all_pinned = self._store.pinned_events(session_id)
         pinned = [
-            event for event in self._store.pinned_events(session_id)
-            if event.kind != "assistant_reasoning"
+            event for event in all_pinned
+            if event.kind not in {"model_raw", "archive", "assistant_reasoning"}
+            and event.sensitivity != "internal"
         ]
         unique_events = {event.event_id: event for event in pinned + recent}
         ordered = sorted(unique_events.values(), key=lambda event: event.sequence)
-        pinned_ids = {event.event_id for event in pinned}
+        pinned_ids = {event.event_id for event in all_pinned}
 
         system_prompt = self._system_prompt(session_id)
-        used_tokens = estimate_tokens(system_prompt)
+        system_tokens = estimate_tokens(system_prompt)
+        used_tokens = system_tokens
         selected: List[EventRecord] = []
-        dropped_pinned: List[str] = []
-        pinned_tokens = 0
         for event in reversed(ordered):
             # Archive summaries must never appear mid-conversation: the current
             # archive state is already injected into the system prompt, and an
@@ -79,21 +82,23 @@ class WorkingSetBuilder:
                 # Hard safety limit: even pinned evidence must never exceed the
                 # provider's context_window, otherwise the request fails with
                 # HTTP 400 and the whole task dies.
-                if is_pinned:
-                    dropped_pinned.append(event.event_id)
                 continue
             if not is_pinned and used_tokens + event_cost > self._budget:
                 continue
             selected.append(event)
             used_tokens += event_cost
-            if is_pinned:
-                pinned_tokens += event_cost
         selected.reverse()
         # Tool rounds must stay intact: an assistant tool_calls message needs
         # every one of its tool replies, and a tool reply needs its caller.
         # The recent-window / budget truncation above can split a round apart,
         # which OpenAI-compatible providers reject with HTTP 400.
         selected = self._drop_broken_tool_rounds(selected)
+        selected_ids = {event.event_id for event in selected}
+        dropped_pinned = sorted(pinned_ids - selected_ids)
+        used_tokens = system_tokens + sum(event.token_estimate + 8 for event in selected)
+        pinned_tokens = sum(
+            event.token_estimate + 8 for event in selected if event.event_id in pinned_ids
+        )
         return WorkingSet(
             messages=[{"role": "system", "content": system_prompt}]
             + [self._to_message(event) for event in selected],
@@ -101,7 +106,7 @@ class WorkingSetBuilder:
             budget=self._budget,
             included_event_ids=[event.event_id for event in selected],
             pinned_event_ids=sorted(pinned_ids),
-            dropped_pinned_ids=sorted(dropped_pinned),
+            dropped_pinned_ids=dropped_pinned,
             pinned_tokens=pinned_tokens,
         )
 
@@ -161,7 +166,11 @@ class WorkingSetBuilder:
         archive = self._store.latest_archive(session_id)
         if archive:
             prompt += "\n\n当前任务状态：\n" + json.dumps(archive["state"], ensure_ascii=False)
-            prompt += f"\n最近归档：{archive['archive_id']}，可用 context_search/context_retrieve 展开。"
+            prompt += (
+                f"\n最近归档：{archive['archive_id']}（事件 {archive['start_sequence']}–"
+                f"{archive['end_sequence']}），已从活动工作集外置；"
+                "可用 context_search/context_retrieve 展开原文。"
+            )
         return prompt
 
     def _workspace_path(self, session_id: str) -> str:

@@ -86,15 +86,21 @@ class SqliteStore:
         self, workspace_id: str, name: Optional[str] = None, path: Optional[str] = None
     ) -> Dict[str, Any]:
         self.get_workspace(workspace_id)
-        if name is not None:
-            clean_name = name.strip() or "未命名工作区"
-            self._db.execute(
-                "UPDATE workspaces SET name=? WHERE workspace_id=?", (clean_name, workspace_id)
-            )
-        if path is not None:
-            self._db.execute(
-                "UPDATE workspaces SET path=? WHERE workspace_id=?", (path.strip(), workspace_id)
-            )
+        with self._lock, self._db:
+            if name is not None:
+                clean_name = name.strip() or "未命名工作区"
+                self._db.execute(
+                    "UPDATE workspaces SET name=? WHERE workspace_id=?", (clean_name, workspace_id)
+                )
+            if path is not None:
+                self._db.execute(
+                    "UPDATE workspaces SET path=? WHERE workspace_id=?", (path.strip(), workspace_id)
+                )
+                session_rows = self._db.execute(
+                    "SELECT session_id FROM sessions WHERE workspace_id=?", (workspace_id,)
+                ).fetchall()
+                for row in session_rows:
+                    self._bump_context_version(row["session_id"])
         return self.get_workspace(workspace_id)
 
     def list_workspaces(self) -> List[Dict[str, Any]]:
@@ -271,6 +277,29 @@ class SqliteStore:
         ).fetchall()
         return [self._to_event(row) for row in reversed(rows)]
 
+    def recent_active_events(self, session_id: str, limit: int) -> List[EventRecord]:
+        """Return recent events that are not covered by an archive range.
+
+        Archives compact only the model-facing projection.  The source rows stay
+        in ``events`` and therefore remain addressable through search/retrieve.
+        Pinned archived events are added back separately by WorkingSetBuilder.
+        """
+        self.get_session(session_id)
+        rows = self._db.execute(
+            """SELECT e.* FROM events e
+               WHERE e.session_id=?
+                 AND e.kind NOT IN ('model_raw', 'archive', 'assistant_reasoning')
+                 AND e.sensitivity!='internal'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM archives a
+                   WHERE a.session_id=e.session_id
+                     AND e.sequence BETWEEN a.start_sequence AND a.end_sequence
+               )
+               ORDER BY e.sequence DESC LIMIT ?""",
+            (session_id, limit),
+        ).fetchall()
+        return [self._to_event(row) for row in reversed(rows)]
+
     def search_events(self, session_id: str, query: str, limit: int = 10) -> List[Dict[str, Any]]:
         self.get_session(session_id)
         terms = searchable_text(query).split()
@@ -308,20 +337,41 @@ class SqliteStore:
         return sorted(weighted, key=lambda item: item["score"])[:limit]
 
     def pin_event(self, session_id: str, event_id: str, rationale: str) -> None:
-        event = self.get_event(event_id)
-        if event.session_id != session_id:
+        self.pin_events(session_id, [event_id], rationale)
+
+    def pin_events(self, session_id: str, event_ids: Sequence[str], rationale: str) -> None:
+        """Atomically validate and pin a batch of events."""
+        unique_ids = list(dict.fromkeys(event_ids))
+        events = [self.get_event(event_id) for event_id in unique_ids]
+        if any(event.session_id != session_id for event in events):
             raise ValidationError("event belongs to another session")
-        with self._db:
-            self._db.execute(
+        with self._lock, self._db:
+            now = self._now()
+            self._db.executemany(
                 "INSERT OR REPLACE INTO pins(session_id,event_id,rationale,created_at) VALUES(?,?,?,?)",
-                (session_id, event_id, rationale, self._now()),
+                [(session_id, event_id, rationale, now) for event_id in unique_ids],
             )
-            self._bump_context_version(session_id)
+            if unique_ids:
+                self._bump_context_version(session_id)
 
     def unpin_event(self, session_id: str, event_id: str) -> None:
-        with self._db:
-            self._db.execute("DELETE FROM pins WHERE session_id=? AND event_id=?", (session_id, event_id))
-            self._bump_context_version(session_id)
+        self.unpin_events(session_id, [event_id])
+
+    def unpin_events(self, session_id: str, event_ids: Sequence[str]) -> None:
+        unique_ids = list(dict.fromkeys(event_ids))
+        with self._lock, self._db:
+            self._db.executemany(
+                "DELETE FROM pins WHERE session_id=? AND event_id=?",
+                [(session_id, event_id) for event_id in unique_ids],
+            )
+            if unique_ids:
+                self._bump_context_version(session_id)
+
+    def pinned_event_ids(self, session_id: str) -> set[str]:
+        rows = self._db.execute(
+            "SELECT event_id FROM pins WHERE session_id=?", (session_id,)
+        ).fetchall()
+        return {row["event_id"] for row in rows}
 
     def pinned_events(self, session_id: str) -> List[EventRecord]:
         rows = self._db.execute(
@@ -335,7 +385,9 @@ class SqliteStore:
         row = self._db.execute(
             """SELECT COALESCE(SUM(e.token_estimate), 0) AS total
                FROM pins p JOIN events e ON e.event_id=p.event_id
-               WHERE p.session_id=?""",
+               WHERE p.session_id=?
+                 AND e.kind NOT IN ('model_raw', 'archive', 'assistant_reasoning')
+                 AND e.sensitivity!='internal'""",
             (session_id,),
         ).fetchone()
         return int(row["total"])
@@ -346,11 +398,18 @@ class SqliteStore:
         if start_sequence < 1 or end_sequence < start_sequence:
             raise ValidationError("invalid event range")
         source_rows = self._db.execute(
-            "SELECT event_id FROM events WHERE session_id=? AND sequence BETWEEN ? AND ? ORDER BY sequence",
+            """SELECT e.event_id FROM events e
+               WHERE e.session_id=? AND e.sequence BETWEEN ? AND ? AND e.kind!='archive'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM archives a
+                     WHERE a.session_id=e.session_id
+                       AND e.sequence BETWEEN a.start_sequence AND a.end_sequence
+                 )
+               ORDER BY e.sequence""",
             (session_id, start_sequence, end_sequence),
         ).fetchall()
         if not source_rows:
-            raise ValidationError("event range is empty")
+            raise ValidationError("event range is empty or already archived")
         archive_id = "arc_" + uuid.uuid4().hex
         summary = {
             "archive_id": archive_id,
@@ -384,6 +443,20 @@ class SqliteStore:
         result = dict(row)
         result["state"] = json.loads(result.pop("state_json"))
         return result
+
+    def archive_stats(self, session_id: str) -> Dict[str, int]:
+        """Count distinct source events currently externalized by archives."""
+        row = self._db.execute(
+            """SELECT COUNT(*) AS count, COALESCE(SUM(e.token_estimate), 0) AS tokens
+               FROM events e
+               WHERE e.session_id=? AND e.kind!='archive' AND EXISTS (
+                   SELECT 1 FROM archives a
+                   WHERE a.session_id=e.session_id
+                     AND e.sequence BETWEEN a.start_sequence AND a.end_sequence
+               )""",
+            (session_id,),
+        ).fetchone()
+        return {"count": int(row["count"]), "tokens": int(row["tokens"])}
 
     def session_stats(self, session_id: str) -> Dict[str, int]:
         self.get_session(session_id)
