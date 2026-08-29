@@ -394,4 +394,15 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - 重启恢复：关闭 Core 后使用同一临时数据目录重启，扩展的 enabled/hash/install time 与 MCP enabled/approved 配置恢复；首次工具访问按需重新启动 server，不增加 Core 冷启动进程。
 - GUI：Vitest 覆盖 Electron 原生路径选择返回值、扩展安全导入、SHA 展示、MCP 授权、连接和工具清单；真实 Electron 开发窗口启动与布局截图通过，Computer Use 点击通道不可用，因此没有把自动点击结果冒充为通过。
 - 最终门禁：139 个 Python 测试、82.65% 分支覆盖率、11 个 Vitest、Ruff、TypeScript、Vite production build、Electron main/preload 语法检查全部通过。
-- 未完成边界：Node/Python Extension Host、逐次 Permission Broker、Streamable HTTP/OAuth、MCP Registry、Open VSX/VSIX、SBOM/签名和 OS 沙箱仍属于 v2 后续。
+- 本轮结束时的未完成边界：Node/Python Extension Host、逐次 Permission Broker、Streamable HTTP/OAuth、MCP Registry、Open VSX/VSIX、SBOM/签名和 OS 沙箱；其中除 Open VSX/VSIX 外，已在下述第 19 轮完成。
+
+## 19. v0.2.0 扩展执行与 MCP 开放生态验收（2026-08-29）
+
+- 独立 Host：签名 Python 扩展在不同 PID 中完成 initialize、tools/list、tools/call；Core 进程未导入扩展模块。Node Host 采用同一协议与沙箱启动器。
+- Permission Broker：once 授权严格绑定参数摘要且消费后失效；session 不跨会话；always 可撤销；pending/decision/allowed 均写入审计表，GUI 可处理请求。
+- Streamable HTTP/OAuth：本地真实协议 handler 覆盖 JSON、SSE、session/protocol header、Bearer、DELETE；OAuth 覆盖 protected-resource/AS discovery、PKCE、state/resource、token 交换和持久 token。
+- Registry：官方线上查询 `filesystem` 返回真实条目；读取一页发现 75 个 remote；`ac.inference.sh/mcp@2.0.1` 成功映射为 `https://api.inference.sh/mcp`，且保持 `approved=false`，未连接或安装第三方代码。
+- 供应链：目录/ZIP 导入生成 CycloneDX 1.7 SBOM 和 Ed25519 安装签名，重启验签；内容篡改显示 `package_modified` 并阻断 Host。
+- OS 沙箱：macOS sandbox-exec 与 Linux bubblewrap 命令策略均有回归；当前 Codex 宿主对嵌套 `sandbox-exec` 返回 `Operation not permitted`，探测后按设计 fail closed，没有绕过宿主限制。
+- 最终门禁：154 个 Python 测试通过，分支覆盖率 80.95%；12 个 Vitest、Ruff、TypeScript strict、Vite production build、Electron main/preload 语法检查全部通过。
+- 剩余边界：Open VSX/VSIX、第三方发布者公钥信任链、Windows AppContainer、系统 Keychain 和平台 DMG/Windows 签名公证仍属于发布/生态后续，未用本机安装签名冒充这些能力。

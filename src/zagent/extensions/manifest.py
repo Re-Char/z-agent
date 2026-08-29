@@ -14,11 +14,16 @@ from typing import Any, Dict, List, Optional
 
 from zagent.domain.errors import ValidationError
 
+from .supply_chain import (
+    INSTALL_METADATA_NAME,
+    SBOM_NAME,
+    ExtensionSupplyChain,
+)
+
 EXTENSION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,127}$")
 ALLOWED_CONTRIBUTIONS = {"tools", "views", "skills", "model_providers", "context_sources"}
 ALLOWED_RUNTIMES = {"node", "python", "declarative"}
 MANIFEST_NAME = "zagent.extension.json"
-INSTALL_METADATA_NAME = ".zagent-install.json"
 MAX_PACKAGE_FILES = 2_048
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 MAX_FILE_BYTES = 16 * 1024 * 1024
@@ -39,6 +44,8 @@ class ExtensionManifest:
     status: str = "discovered"
     package_sha256: Optional[str] = None
     installed_at: Optional[str] = None
+    signature_status: str = "unsigned"
+    sbom_path: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         value = asdict(self)
@@ -51,6 +58,7 @@ class ExtensionRegistry:
         self._roots = [Path(data_dir) / "extensions"]
         if project_dir:
             self._roots.append(Path(project_dir) / ".zagent" / "extensions")
+        self._supply_chain = ExtensionSupplyChain(data_dir)
 
     def discover(self) -> List[ExtensionManifest]:
         manifests: List[ExtensionManifest] = []
@@ -67,6 +75,12 @@ class ExtensionRegistry:
                     manifests.append(manifest)
                     seen.add(manifest.extension_id)
         return manifests
+
+    def get(self, extension_id: str) -> ExtensionManifest:
+        for manifest in self.discover():
+            if manifest.extension_id == extension_id:
+                return manifest
+        raise ValidationError(f"extension not found: {extension_id}")
 
     def create_extension(self, spec: Dict[str, Any]) -> ExtensionManifest:
         """Create a declarative extension under the user data dir and return its manifest."""
@@ -107,6 +121,13 @@ class ExtensionRegistry:
             if manifest.status == "integrity_failed":
                 raise ValidationError("extension entry integrity check failed")
             digest = self._package_digest(package_root)
+            self._supply_chain.seal(
+                package_root,
+                extension_id=manifest.extension_id,
+                version=manifest.version,
+                permissions=manifest.permissions,
+                package_sha256=digest,
+            )
             self._write_json(
                 package_root / INSTALL_METADATA_NAME,
                 {
@@ -189,16 +210,26 @@ class ExtensionRegistry:
         integrity = value.get("integrity")
         status = self._verify_integrity(resolved_entry, integrity)
         metadata = self._read_install_metadata(path.parent)
+        signature_status = "unsigned"
         if metadata and status != "integrity_failed":
             recorded_digest = metadata.get("package_sha256")
-            status = (
-                "installed"
-                if recorded_digest and recorded_digest == self._package_digest(path.parent)
-                else "package_modified"
-            )
         permissions_value = value.get("permissions", [])
         if not isinstance(permissions_value, list):
             raise ValidationError("extension permissions must be an array")
+        permissions = [str(item) for item in permissions_value]
+        if metadata and status != "integrity_failed":
+            current_digest = self._package_digest(path.parent)
+            if not recorded_digest or recorded_digest != current_digest:
+                status = "package_modified"
+            else:
+                signature_status = self._supply_chain.verify(
+                    path.parent,
+                    extension_id=extension_id,
+                    version=str(value.get("version", "0.0.0")),
+                    permissions=permissions,
+                    package_sha256=current_digest,
+                )
+                status = "installed" if signature_status == "verified" else signature_status
         return ExtensionManifest(
             extension_id=extension_id,
             version=str(value.get("version", "0.0.0")),
@@ -207,12 +238,14 @@ class ExtensionRegistry:
             runtime=runtime,
             entry=entry,
             contributes=contributes,
-            permissions=[str(item) for item in permissions_value],
+            permissions=permissions,
             integrity=integrity,
             enabled=bool(metadata.get("enabled", False)) if metadata else bool(value.get("enabled", False)),
             status=status,
             package_sha256=metadata.get("package_sha256") if metadata else None,
             installed_at=metadata.get("installed_at") if metadata else None,
+            signature_status=signature_status,
+            sbom_path=str(path.parent / SBOM_NAME) if (path.parent / SBOM_NAME).is_file() else None,
         )
 
     def _extension_root(self, extension_id: str) -> Path:
@@ -321,15 +354,9 @@ class ExtensionRegistry:
 
     @staticmethod
     def _package_digest(root: Path) -> str:
-        digest = hashlib.sha256()
-        for path in ExtensionRegistry._validated_directory_files(root):
-            if path.name == INSTALL_METADATA_NAME:
-                continue
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            digest.update(len(relative).to_bytes(4, "big"))
-            digest.update(relative)
-            digest.update(path.read_bytes())
-        return digest.hexdigest()
+        return ExtensionSupplyChain.content_digest(
+            root, ExtensionRegistry._validated_directory_files(root)
+        )
 
     @staticmethod
     def _read_install_metadata(root: Path) -> Dict[str, Any]:

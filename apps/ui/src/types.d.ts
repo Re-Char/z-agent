@@ -12,6 +12,8 @@ interface ZAgentBridge {
   cancelStream?(): Promise<{ cancelled: boolean }>;
   selectFolder?(): Promise<string | null>;
   selectExtension?(): Promise<string | null>;
+  oauthInfo?(): Promise<{ redirectUri: string }>;
+  openExternal?(url: string): Promise<{ opened: boolean }>;
   platform: string;
 }
 

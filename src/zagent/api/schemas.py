@@ -74,6 +74,16 @@ class UpdateExtensionRequest(StrictRequest):
     enabled: bool
 
 
+class ExtensionHostRequest(StrictRequest):
+    session_id: Optional[str] = None
+
+
+class CallExtensionToolRequest(StrictRequest):
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    session_id: Optional[str] = None
+    confirmed: bool = False
+
+
 class AddMcpServerRequest(StrictRequest):
     name: str = Field(min_length=1, max_length=128)
     transport: str = Field(default="stdio", max_length=8)
@@ -82,7 +92,15 @@ class AddMcpServerRequest(StrictRequest):
     cwd: Optional[str] = Field(default=None, max_length=1000)
     env: List[str] = Field(default_factory=list)
     timeout_seconds: float = Field(default=15.0, ge=0.1, le=300)
+    sandbox: bool = True
+    sandbox_read_roots: List[str] = Field(default_factory=list)
+    sandbox_write_roots: List[str] = Field(default_factory=list)
+    network: bool = False
     url: Optional[str] = Field(default=None, max_length=1000)
+    oauth: bool = False
+    oauth_client_id: str = Field(default="", max_length=500)
+    oauth_scopes: List[str] = Field(default_factory=list)
+    oauth_redirect_uri: str = Field(default="", max_length=1000)
     enabled: bool = True
     approved: bool = False
 
@@ -97,3 +115,24 @@ class UpdateMcpServerRequest(StrictRequest):
 
 class CallMcpToolRequest(StrictRequest):
     arguments: Dict[str, Any] = Field(default_factory=dict)
+    confirmed: bool = False
+
+
+class DecidePermissionRequest(StrictRequest):
+    decision: str = Field(pattern=r"^(approved|denied)$")
+    scope: str = Field(default="once", pattern=r"^(once|session|always)$")
+
+
+class BeginMcpOAuthRequest(StrictRequest):
+    redirect_uri: Optional[str] = Field(default=None, max_length=1000)
+
+
+class CompleteMcpOAuthRequest(StrictRequest):
+    state: str = Field(min_length=16, max_length=500)
+    code: str = Field(min_length=1, max_length=4000)
+
+
+class ImportMcpRegistryRequest(StrictRequest):
+    server_name: str = Field(min_length=1, max_length=500)
+    version: str = Field(default="latest", min_length=1, max_length=128)
+    local_name: Optional[str] = Field(default=None, min_length=1, max_length=128)

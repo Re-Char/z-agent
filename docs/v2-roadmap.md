@@ -13,8 +13,13 @@
 - ✅ 扩展目录/ZIP 已实现安全导入：暂存校验、路径穿越/符号链接/压缩包限额防护、包 SHA-256、安装时间、原子替换回滚、启停与 Core 重启恢复；Electron 提供原生选择器。
 - ✅ MCP stdio 已实现无 SDK 的 JSON-RPC 客户端：`2025-11-25` 初始化协商、换行帧限制、超时/取消、stderr 限额、工具分页发现/调用、按需启动和分级关闭；真实子进程及 Core HTTP 重启链路均通过。
 - ✅ 明确批准的 MCP 工具会转换为命名空间化原生工具 schema，进入现有 Agent loop、call ID 幂等保护和 EventLog 工具结果；未批准配置不会执行。
+- ✅ Python/Node 扩展在独立 Host 子进程加载；安装生成 CycloneDX 1.7 SBOM 与本机 Ed25519 签名，运行前重算内容摘要并验签。
+- ✅ Permission Broker 持久保存 pending/once/session/always 决策、参数摘要、可撤销 grant 与审计；MCP 与扩展工具调用统一默认拒绝。
+- ✅ MCP Streamable HTTP 支持 JSON/SSE response、`Mcp-Session-Id`、`MCP-Protocol-Version`、Bearer token 和会话 DELETE；OAuth 支持 RFC 9728/8414/OIDC discovery、PKCE S256、resource audience、state、refresh 与 DCR。
+- ✅ 官方 MCP Registry v0.1 支持搜索、版本详情和 Streamable HTTP remote 导入；真实线上搜索与 remote 映射通过，导入保持未批准且不自动执行包安装脚本。
+- ✅ macOS `sandbox-exec` 与 Linux bubblewrap backend 已实现，文件/网络按 manifest/config 收敛；引擎缺失或宿主禁止嵌套时 fail closed。
 - ⏳ 尚未完成：受控 Runner、真实 provider 下的 3 次 checkpoint 长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。因此 P0 总验收仍未标记完成。
-- ⏳ 扩展/MCP 仍未完成：独立 Extension Host、逐次 Permission Broker、MCP Streamable HTTP/OAuth、registry/Open VSX adapter、SBOM/签名与 OS 级沙箱仍属于后续切片。
+- ⏳ 扩展生态余项：Open VSX/VSIX adapter、发布者公钥/透明日志信任链、Windows AppContainer backend 与项目 lockfile。当前 Ed25519 签名是本机安装证明，不冒充第三方发布者签名。
 
 ## 1. P0：长任务可靠性与证据化验收
 
@@ -78,7 +83,7 @@
 
 ## 6. P1：扩展 Host 与 Marketplace
 
-**当前进度：** 本地目录/ZIP 安装与受管 MCP stdio 已完成首个可运行切片；这不等于完整 Extension Host 或 Marketplace 已完成。
+**当前进度：** 本地目录/ZIP、独立 Host、Permission Broker、MCP stdio/Streamable HTTP/OAuth、官方 Registry remote、SBOM/本机签名与 macOS/Linux 沙箱 backend 已完成。Open VSX/VSIX 和完整发布者信任链仍未完成。
 
 - 完成 Z-Agent Extension SDK、manifest、权限声明、独立 Worker/子进程 host、崩溃隔离和项目 lockfile。
 - 实现 MCP stdio/HTTP transport、官方/自定义 registry adapter、工具权限审查、OAuth/secret 隔离与调用审计。

@@ -409,8 +409,8 @@ Core service 是独立可执行进程，GUI 崩溃或重启不应破坏任务和
 - 精确文本替换默认只允许唯一匹配，写入使用同目录临时文件原子替换；
 - 不提供删除、任意命令、shell、提权、网络上传或工作区外访问。
 
-这不是完整 OS 沙箱。未来引入终端、扩展 host 或 MCP 文件工具时，必须经过独立 permission
-broker，不能复用 v1 文件工具的信任结论。
+工作区文本工具自身不是 OS 沙箱。现有扩展 Host 与 MCP stdio 另行经过独立 Permission Broker
+和 OS 沙箱启动器，不能复用 v1 文件工具的信任结论；未来终端/Runner 也必须走同一原则。
 
 ### 14.5 打包与发布
 
@@ -478,7 +478,7 @@ MCP server 也进入同一许可模型：记录 server 二进制/包哈希、tra
 | B：Code-OSS/Theia workspace 容器 | 在内嵌或独立 IDE workspace 内运行兼容扩展 | 中；需要维护 extension host |
 | C：把任意 VSIX 当 Z-Agent 内核扩展运行 | 直接调用 VS Code API 并改 Agent 行为 | 低；不能作为承诺 |
 
-v1 只实现 manifest/MCP 配置发现和校验。当前 `0.2.0` 已增加 Z-Agent 目录/ZIP 安全安装和受管 MCP stdio 调用，但仍不直接执行 Node/Python 扩展；下一步实施独立 Z-Agent Extension Host 与 Marketplace adapter。需要编辑器生态时再实施 B。C 仅针对少量目标扩展做适配器，不提供“任意 VSIX”承诺。
+`0.2.0` 现已实现 Z-Agent 目录/ZIP 安全安装、独立 Python/Node Extension Host、受管 MCP stdio/Streamable HTTP、OAuth 与官方 MCP Registry remote 导入。需要编辑器生态时再实施 B；Open VSX/VSIX adapter 仍未实现。C 仅针对少量目标扩展做适配器，不提供“任意 VSIX”承诺。
 
 ### 15.4 扩展安全与供应链
 
@@ -583,9 +583,9 @@ v1 合并门槛：
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
 | 工作区代码工具 | 已实现 | 安全读取/检索/创建目录、SHA-256 版本锁写入与精确替换；敏感文件、`.git`、依赖/缓存目录、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
-| 扩展生态 | v2 首个可运行切片 | 目录/ZIP 安全导入、包 SHA、原子安装/替换、启停与重启恢复；MCP stdio 真实握手/发现/调用并接入 Agent loop；Extension Host、HTTP/OAuth、registry/Open VSX 与逐次权限仍待完成 |
-| 测试 | 已实现 | 139 个 Python 单元/集成/功能测试，11 个前端交互/Markdown 测试，82.65% 核心分支覆盖率、Ruff、类型检查、生产构建、Electron 窗口烟测，以及真实 Core HTTP → MCP stdio → tool 与重启恢复验收 |
+| 扩展生态 | v2 可执行切片 | 独立 Python/Node Host；逐次 Permission Broker；MCP stdio/Streamable HTTP、OAuth PKCE、官方 Registry remote 导入；CycloneDX SBOM、本机 Ed25519 安装签名与 fail-closed OS 沙箱。Open VSX/VSIX 与发布者公钥信任链仍待完成 |
+| 测试 | 已实现 | 154 个 Python 单元/集成/功能测试，12 个前端交互/Markdown 测试，80.95% 核心分支覆盖率、Ruff、类型检查与生产构建；真实独立 Extension Host、MCP stdio、官方 Registry 线上搜索/remote 映射均通过 |
 
-本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key；Node/Python 第三方扩展在权限 broker 和隔离 host 完成前保持不执行。MCP stdio 只有用户明确批准后才会作为独立子进程按需启动；当前批准粒度是 server 级，尚未替代后续逐次权限确认与 OS 沙箱。
+本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key。第三方执行采用三道门：server/extension 启用、独立 Host/transport、逐动作 Permission Broker；stdio/extension 还需 OS 沙箱可用。当前 macOS 测试宿主禁止嵌套 `sandbox-exec`，自动化验证了 fail-closed 路径；在普通桌面宿主上会先探测再运行。
 
 当前 DMG 尚未内置可重定位 Python Core runtime，也未配置平台签名、公证和正式应用图标，因此不能视为面向干净机器的发布包；这些属于 v2 发布工程，不影响仓库内 Conda 环境和 Electron 开发模式运行。完整验收边界与真实长任务结果见 [v1-acceptance.md](v1-acceptance.md)。

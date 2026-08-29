@@ -88,6 +88,7 @@ tests/
 
 - Core API v1 只允许 loopback 地址；Renderer 不持有 Core token，所有请求经 Electron 主进程代理。
 - 模型只能提出工具调用，本地 ToolExecutor 决定是否执行。
-- 扩展和 MCP 来源默认不可信；扩展导入默认停用，可执行扩展不会加载到主进程。MCP 必须同时“启用 + 明确授权”才可启动并暴露给 Agent。
-- MCP stdio 使用参数数组直接启动、从不经过 shell；只传基础环境变量与用户点名的环境变量。当前仍不是完整 OS 沙箱，高影响工具的逐次授权属于后续 Permission Broker。
-- v1 API Key 以权限 `0600` 的本地文件保存；生产版将替换为系统 Keychain/Credential Manager。
+- 扩展和 MCP 来源默认不可信；可执行扩展只在独立 Python/Node Extension Host 中加载，绝不进入 Core/Electron 主进程。扩展启动与 MCP/扩展工具调用统一经过可撤销 Permission Broker。
+- MCP stdio 使用参数数组直接启动、从不经过 shell；默认进入 macOS `sandbox-exec` 或 Linux bubblewrap，沙箱不可用时拒绝执行。Streamable HTTP 支持 JSON/SSE 响应、会话头与 OAuth PKCE；旧版 SSE transport 不执行。
+- 扩展安装生成 CycloneDX 1.7 SBOM，并使用数据目录 trust key 的本机 Ed25519 安装签名；内容、SBOM 或签名变化都会阻断 Extension Host。
+- API Key 与 OAuth token 以权限 `0600` 的本地文件保存；迁移到系统 Keychain/Credential Manager 仍属于发布加固项。

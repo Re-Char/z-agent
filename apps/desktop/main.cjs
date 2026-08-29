@@ -146,6 +146,22 @@ ipcMain.handle("core:request", async (_event, request) => {
   return payload;
 });
 
+ipcMain.handle("core:oauth-info", () => {
+  if (!coreInfo) throw new Error("核心服务不可用");
+  return {
+    redirectUri: `http://${coreInfo.host}:${coreInfo.port}/v1/mcp/oauth/callback/browser`
+  };
+});
+
+ipcMain.handle("shell:open-external", async (_event, url) => {
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(parsed.hostname))) {
+    throw new Error("仅允许打开 HTTPS 或本机 HTTP URL");
+  }
+  await shell.openExternal(parsed.toString());
+  return { opened: true };
+});
+
 ipcMain.handle("core:stream", async (event, request) => {
   if (!coreInfo) throw new Error("核心服务不可用");
   const senderId = event.sender.id;

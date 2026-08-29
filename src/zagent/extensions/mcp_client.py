@@ -13,6 +13,7 @@ from typing import Any, BinaryIO, Dict, Optional
 
 from zagent import __version__
 from zagent.domain.errors import ValidationError
+from zagent.security.sandbox import SandboxLauncher, SandboxPolicy
 
 PROTOCOL_VERSION = "2025-11-25"
 SUPPORTED_PROTOCOL_VERSIONS = {
@@ -41,12 +42,20 @@ class MCPStdioClient:
         cwd: Optional[str] = None,
         env_names: Optional[list[str]] = None,
         timeout_seconds: float = 15.0,
+        sandbox: bool = True,
+        sandbox_read_roots: Optional[list[str]] = None,
+        sandbox_write_roots: Optional[list[str]] = None,
+        network: bool = False,
     ) -> None:
         self._command = command
         self._args = args
         self._cwd = cwd
         self._env_names = env_names or []
         self._timeout = timeout_seconds
+        self._sandbox = sandbox
+        self._sandbox_read_roots = sandbox_read_roots or []
+        self._sandbox_write_roots = sandbox_write_roots or []
+        self._network = network
         self._process: Optional[subprocess.Popen[bytes]] = None
         self._reader: Optional[threading.Thread] = None
         self._stderr_reader: Optional[threading.Thread] = None
@@ -208,6 +217,7 @@ class MCPStdioClient:
                 raise ValidationError(f"MCP working directory does not exist: {self._cwd}")
             cwd = str(cwd_path)
         env = {key: value for key in BASE_ENV_KEYS if (value := os.environ.get(key)) is not None}
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
         for name in self._env_names:
             if not name or "=" in name or "\x00" in name:
                 raise ValidationError(f"invalid MCP environment variable name: {name!r}")
@@ -215,8 +225,23 @@ class MCPStdioClient:
             if value is not None:
                 env[name] = value
         try:
+            automatic_read_roots = list(self._sandbox_read_roots)
+            if cwd:
+                automatic_read_roots.append(cwd)
+            if self._args:
+                first_argument = Path(self._args[0]).expanduser()
+                if first_argument.exists():
+                    automatic_read_roots.append(str(first_argument.resolve()))
+            policy = SandboxPolicy.build(
+                automatic_read_roots,
+                self._sandbox_write_roots,
+                network=self._network,
+            )
+            command = SandboxLauncher().wrap(
+                executable, self._args, policy, enabled=self._sandbox
+            )
             process = subprocess.Popen(
-                [executable, *self._args],
+                command,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

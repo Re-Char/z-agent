@@ -5,8 +5,9 @@ import re
 import threading
 from typing import Any, Dict
 
-from zagent.domain.errors import ToolExecutionError
+from zagent.domain.errors import PermissionRequiredError, ToolExecutionError
 from zagent.extensions import MCPManager
+from zagent.security import PermissionBroker
 
 _UNSAFE_TOOL_CHARACTER = re.compile(r"[^A-Za-z0-9_-]+")
 
@@ -14,8 +15,9 @@ _UNSAFE_TOOL_CHARACTER = re.compile(r"[^A-Za-z0-9_-]+")
 class MCPToolExecutor:
     """Expose explicitly approved MCP tools to the provider's native tool-calling loop."""
 
-    def __init__(self, manager: MCPManager) -> None:
+    def __init__(self, manager: MCPManager, permissions: PermissionBroker) -> None:
         self._manager = manager
+        self._permissions = permissions
         self._dispatch: Dict[str, tuple[str, str]] = {}
         self._lock = threading.RLock()
 
@@ -64,7 +66,17 @@ class MCPToolExecutor:
             raise ToolExecutionError(f"unknown or unapproved MCP tool: {name}")
         server_name, tool_name = target
         try:
+            self._permissions.require(
+                _session_id,
+                "mcp",
+                server_name,
+                f"tool:{tool_name}",
+                arguments,
+                {"server": server_name, "tool": tool_name},
+            )
             result = self._manager.call_tool(server_name, tool_name, arguments)
+        except PermissionRequiredError:
+            raise
         except Exception as exc:
             raise ToolExecutionError(f"MCP tool {server_name}/{tool_name} failed: {exc}") from exc
         return {

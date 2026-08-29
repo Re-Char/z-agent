@@ -117,6 +117,38 @@ def test_import_real_zip_with_top_level_directory(tmp_path):
     assert (Path(imported.root) / "README.md").read_text(encoding="utf-8") == "真实 ZIP 扩展"
 
 
+def test_extension_sbom_or_signature_tampering_blocks_execution(tmp_path):
+    source = tmp_path / "signed-source"
+    source.mkdir()
+    (source / "zagent.extension.json").write_text(
+        json.dumps(
+            {
+                "id": "com.example.signed",
+                "version": "1.0.0",
+                "runtime": "python",
+                "entry": "extension.py",
+                "contributes": ["tools"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (source / "extension.py").write_text("TOOLS=[]\ndef invoke(name, arguments): return {}\n")
+    (source / "requirements.txt").write_text("httpx==0.28.1\n", encoding="utf-8")
+    data_dir = tmp_path / "data"
+    imported = ExtensionRegistry(str(data_dir)).import_extension(str(source), enabled=True)
+    sbom_path = Path(imported.sbom_path or "")
+    sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+    assert any(
+        item.get("type") == "library" and item.get("name") == "httpx"
+        for item in sbom["components"]
+    )
+    sbom["version"] = 2
+    sbom_path.write_text(json.dumps(sbom), encoding="utf-8")
+    blocked = ExtensionRegistry(str(data_dir)).discover()[0]
+    assert blocked.status == "signature_failed"
+    assert blocked.signature_status == "signature_failed"
+
+
 def test_import_rejects_zip_traversal_symlinks_and_duplicates(tmp_path):
     registry = ExtensionRegistry(str(tmp_path / "data"))
     unsafe_zip = tmp_path / "unsafe.zip"

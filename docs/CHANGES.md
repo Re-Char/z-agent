@@ -149,6 +149,17 @@
 - Electron 增加扩展目录/ZIP 原生选择器、包 SHA 展示、启停、MCP 授权、连接测试和工具清单；HTTP/SSE 会明确显示当前只保存配置。
 - 真实验收使用运行中的 Core HTTP API 导入中文扩展，启动独立 MCP server 子进程，协商 `2025-11-25`，发现并调用 `echo`；Core 重启后再次恢复扩展与 MCP 工具。
 
+### 19. v0.2.0 扩展 Host、权限、HTTP/OAuth 与供应链
+
+- 新增独立 Python/Node Extension Host；扩展入口只在子进程加载，以 MCP 风格 JSON-RPC 暴露工具，Core 与 Electron 不导入第三方模块。
+- 新增 SQLite Permission Broker：请求绑定 subject/action/session/参数 SHA-256，支持 once/session/always、撤销与完整 audit；MCP 和扩展工具统一逐动作检查。
+- MCP Streamable HTTP 实现 JSON/SSE response、session/protocol headers、Bearer 与 DELETE；OAuth 实现 protected-resource/authorization-server discovery、PKCE S256、state/resource、refresh 与动态客户端注册。
+- 接入官方 MCP Registry v0.1 搜索、版本详情和 Streamable HTTP remote 导入；只读线上搜索和真实 remote 映射通过，包命令不自动执行。
+- 扩展导入生成 CycloneDX 1.7 SBOM，并用数据目录 trust key 做 Ed25519 安装签名；内容/SBOM/签名篡改阻断执行。
+- stdio/Extension Host 默认使用 macOS sandbox-exec 或 Linux bubblewrap；引擎不可用或宿主禁止嵌套时拒绝启动，用户必须显式关闭 sandbox 才能承担风险。
+- Electron 增加 Permission Center、Registry 搜索/导入、Extension Host 工具发现、Streamable HTTP/OAuth 配置和系统浏览器 OAuth 回调。
+- 门禁结果：154 个 Python 测试、80.95% 分支覆盖率、12 个 Vitest、Ruff、TypeScript strict、Vite production build 和 Electron main/preload 语法检查全部通过。
+
 ## 验证状态
 
 - Python：**139 个测试通过**，分支覆盖率 **82.65%**（门槛 80%），Ruff 全绿

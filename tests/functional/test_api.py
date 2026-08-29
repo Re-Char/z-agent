@@ -233,6 +233,7 @@ def test_api_real_extension_import_and_mcp_tool_call(tmp_path):
                     "command": sys.executable,
                     "args": [str(MCP_ECHO_SERVER)],
                     "approved": True,
+                    "sandbox": False,
                 },
             )
             assert configured.status_code == 201
@@ -244,7 +245,7 @@ def test_api_real_extension_import_and_mcp_tool_call(tmp_path):
             called = client.post(
                 "/v1/mcp/servers/api-echo/tools/echo/call",
                 headers=headers,
-                json={"arguments": {"text": "端到端成功"}},
+                json={"arguments": {"text": "端到端成功"}, "confirmed": True},
             )
             assert called.json()["result"]["structuredContent"]["echo"] == "端到端成功"
             assert client.post(
@@ -260,6 +261,40 @@ def test_api_real_extension_import_and_mcp_tool_call(tmp_path):
         assert restarted.mcp.list_servers()[0]["approved"] is True
     finally:
         restarted.close()
+
+
+def test_api_permission_broker_decision_grant_audit_and_revoke(tmp_path):
+    container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
+    headers = {"Authorization": "Bearer test-token"}
+    try:
+        with TestClient(create_api(container, auth_token="test-token")) as client:
+            request = container.store.create_permission_request(
+                None,
+                "mcp",
+                "remote",
+                "tool:write",
+                "a" * 64,
+                {"path": "README.md"},
+            )
+            pending = client.get("/v1/permissions/requests", headers=headers)
+            assert pending.json()["requests"][0]["request_id"] == request["request_id"]
+            decided = client.post(
+                f"/v1/permissions/requests/{request['request_id']}/decision",
+                headers=headers,
+                json={"decision": "approved", "scope": "always"},
+            )
+            assert decided.json()["request"]["status"] == "approved"
+            grants = client.get("/v1/permissions/grants", headers=headers).json()["grants"]
+            assert grants[0]["scope"] == "always"
+            audit = client.get("/v1/permissions/audit?limit=10", headers=headers).json()["audit"]
+            assert {item["outcome"] for item in audit} >= {"pending", "approved"}
+            revoked = client.delete(
+                f"/v1/permissions/grants/{grants[0]['grant_id']}", headers=headers
+            )
+            assert revoked.json() == {"ok": True}
+            assert client.delete("/v1/permissions/grants/missing", headers=headers).status_code == 404
+    finally:
+        container.close()
 
 
 def test_api_workspace_flow(tmp_path):

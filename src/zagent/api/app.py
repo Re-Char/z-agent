@@ -6,20 +6,32 @@ from pathlib import Path
 from typing import Annotated, AsyncIterator, Optional
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 
 from zagent import __version__
 from zagent.bootstrap import ApplicationContainer
-from zagent.domain.errors import AgentLimitError, NotFoundError, ValidationError, ZAgentError
+from zagent.domain.errors import (
+    AgentLimitError,
+    NotFoundError,
+    PermissionRequiredError,
+    ValidationError,
+    ZAgentError,
+)
 
 from .schemas import (
     AddMcpServerRequest,
+    BeginMcpOAuthRequest,
+    CallExtensionToolRequest,
     CallMcpToolRequest,
+    CompleteMcpOAuthRequest,
     CreateExtensionRequest,
     CreateSessionRequest,
     CreateWorkspaceRequest,
+    DecidePermissionRequest,
     ExecuteContextToolRequest,
+    ExtensionHostRequest,
     ImportExtensionRequest,
+    ImportMcpRegistryRequest,
     SendMessageRequest,
     UpdateExtensionRequest,
     UpdateMcpServerRequest,
@@ -65,6 +77,8 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         content = {"error": str(exc)}
         if isinstance(exc, AgentLimitError) and exc.checkpoint:
             content["checkpoint"] = exc.checkpoint
+        if isinstance(exc, PermissionRequiredError):
+            content["permission_request_id"] = exc.request_id
         return JSONResponse(status_code=code, content=content)
 
     @app.get("/health")
@@ -192,9 +206,70 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="extension not found")
         return {"ok": True}
 
+    @app.get("/v1/extensions/{extension_id}/host", dependencies=protected)
+    def extension_host_status(extension_id: str, core: CoreDependency) -> dict:
+        return core.extension_hosts.status(extension_id)
+
+    @app.post("/v1/extensions/{extension_id}/host/connect", dependencies=protected)
+    def connect_extension_host(
+        extension_id: str, body: ExtensionHostRequest, core: CoreDependency
+    ) -> dict:
+        return core.extension_hosts.connect(extension_id, body.session_id)
+
+    @app.post("/v1/extensions/{extension_id}/host/disconnect", dependencies=protected)
+    def disconnect_extension_host(extension_id: str, core: CoreDependency) -> dict:
+        return {"disconnected": core.extension_hosts.disconnect(extension_id)}
+
+    @app.get("/v1/extensions/{extension_id}/host/tools", dependencies=protected)
+    def list_extension_tools(
+        extension_id: str,
+        core: CoreDependency,
+        session_id: Optional[str] = Query(default=None),
+    ) -> dict:
+        return {"tools": core.extension_hosts.list_tools(extension_id, session_id)}
+
+    @app.post(
+        "/v1/extensions/{extension_id}/host/tools/{tool_name}/call",
+        dependencies=protected,
+    )
+    def call_extension_tool(
+        extension_id: str,
+        tool_name: str,
+        body: CallExtensionToolRequest,
+        core: CoreDependency,
+    ) -> dict:
+        if body.confirmed:
+            core.permissions.approve_inline_once(
+                body.session_id,
+                "extension",
+                extension_id,
+                f"tool:{tool_name}",
+                body.arguments,
+                {"extension": extension_id, "tool": tool_name, "source": "api-confirmation"},
+            )
+        return {
+            "result": core.extension_hosts.call_tool(
+                extension_id, tool_name, body.arguments, body.session_id
+            )
+        }
+
     @app.get("/v1/mcp/servers", dependencies=protected)
     def list_mcp_servers(core: CoreDependency) -> dict:
         return {"servers": core.mcp.list_servers()}
+
+    @app.get("/v1/mcp/registry/servers", dependencies=protected)
+    def search_mcp_registry(
+        core: CoreDependency,
+        search: str = Query(default="", max_length=500),
+        limit: int = Query(default=20, ge=1, le=100),
+        cursor: Optional[str] = Query(default=None),
+    ) -> dict:
+        return core.mcp_registry.search(search, limit=limit, cursor=cursor)
+
+    @app.post("/v1/mcp/registry/import", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def import_mcp_registry(body: ImportMcpRegistryRequest, core: CoreDependency) -> dict:
+        spec = core.mcp_registry.remote_config(body.server_name, body.version, body.local_name)
+        return {"server": core.mcp.add_server(spec)}
 
     @app.post("/v1/mcp/servers", status_code=status.HTTP_201_CREATED, dependencies=protected)
     def add_mcp_server(body: AddMcpServerRequest, core: CoreDependency) -> dict:
@@ -210,6 +285,37 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     def connect_mcp_server(name: str, core: CoreDependency) -> dict:
         return core.mcp.connect(name)
 
+    @app.post("/v1/mcp/servers/{name}/oauth/begin", dependencies=protected)
+    def begin_mcp_oauth(name: str, body: BeginMcpOAuthRequest, core: CoreDependency) -> dict:
+        server = core.mcp.registry.get_server(name)
+        if server["transport"] != "http" or not server.get("oauth"):
+            raise ValidationError("MCP server is not configured for Streamable HTTP OAuth")
+        redirect_uri = body.redirect_uri or server.get("oauth_redirect_uri")
+        if not redirect_uri:
+            raise ValidationError("OAuth redirect_uri is required")
+        return core.oauth.begin(
+            name,
+            server["url"],
+            server.get("oauth_client_id", ""),
+            redirect_uri,
+            server.get("oauth_scopes", []),
+        )
+
+    @app.post("/v1/mcp/oauth/callback", dependencies=protected)
+    def complete_mcp_oauth(body: CompleteMcpOAuthRequest, core: CoreDependency) -> dict:
+        return core.oauth.complete(body.state, body.code)
+
+    @app.get("/v1/mcp/oauth/callback/browser", response_class=HTMLResponse)
+    def complete_mcp_oauth_browser(state: str, code: str, core: CoreDependency) -> str:
+        result = core.oauth.complete(state, code)
+        server = str(result["server_name"]).replace("<", "&lt;").replace(">", "&gt;")
+        return (
+            "<!doctype html><meta charset='utf-8'><title>Z-Agent OAuth</title>"
+            "<body style='font:16px system-ui;padding:40px;background:#111;color:#eee'>"
+            f"<h1>授权完成</h1><p>MCP Server <strong>{server}</strong> 已连接到 Z-Agent。</p>"
+            "<p>现在可以关闭此页面并返回应用。</p></body>"
+        )
+
     @app.post("/v1/mcp/servers/{name}/disconnect", dependencies=protected)
     def disconnect_mcp_server(name: str, core: CoreDependency) -> dict:
         return {"disconnected": core.mcp.disconnect(name)}
@@ -222,12 +328,62 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     def call_mcp_tool(
         name: str, tool_name: str, body: CallMcpToolRequest, core: CoreDependency
     ) -> dict:
+        if body.confirmed:
+            core.permissions.approve_inline_once(
+                None,
+                "mcp",
+                name,
+                f"tool:{tool_name}",
+                body.arguments,
+                {"server": name, "tool": tool_name, "source": "api-confirmation"},
+            )
+        core.permissions.require(
+            None,
+            "mcp",
+            name,
+            f"tool:{tool_name}",
+            body.arguments,
+            {"server": name, "tool": tool_name, "source": "api"},
+        )
         return {"result": core.mcp.call_tool(name, tool_name, body.arguments)}
 
     @app.delete("/v1/mcp/servers/{name}", dependencies=protected)
     def remove_mcp_server(name: str, core: CoreDependency) -> dict:
         if not core.mcp.remove_server(name):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="MCP server not found")
+        return {"ok": True}
+
+    @app.get("/v1/permissions/requests", dependencies=protected)
+    def list_permission_requests(
+        core: CoreDependency, request_status: str = Query(default="pending", alias="status")
+    ) -> dict:
+        selected = None if request_status == "all" else request_status
+        return {"requests": core.store.list_permission_requests(selected)}
+
+    @app.post("/v1/permissions/requests/{request_id}/decision", dependencies=protected)
+    def decide_permission(
+        request_id: str, body: DecidePermissionRequest, core: CoreDependency
+    ) -> dict:
+        return {
+            "request": core.store.decide_permission_request(
+                request_id, body.decision, body.scope
+            )
+        }
+
+    @app.get("/v1/permissions/grants", dependencies=protected)
+    def list_permission_grants(core: CoreDependency) -> dict:
+        return {"grants": core.store.list_permission_grants()}
+
+    @app.get("/v1/permissions/audit", dependencies=protected)
+    def list_permission_audit(
+        core: CoreDependency, limit: int = Query(default=200, ge=1, le=1000)
+    ) -> dict:
+        return {"audit": core.store.list_permission_audit(limit)}
+
+    @app.delete("/v1/permissions/grants/{grant_id}", dependencies=protected)
+    def revoke_permission_grant(grant_id: str, core: CoreDependency) -> dict:
+        if not core.store.revoke_permission_grant(grant_id):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="grant not found")
         return {"ok": True}
 
     return app

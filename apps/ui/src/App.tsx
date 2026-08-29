@@ -8,10 +8,13 @@ type ContextStatus = { stats: { count: number; tokens: number }; working_set: { 
 type ModelConfig = { id: string; name: string; provider: string; model: string; base_url: string; context_window: number; soft_limit_ratio: number; hard_limit_ratio: number };
 type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string };
 type TokenStats = { total_tokens: number; completion_tokens: number; cache_hit_tokens: number; cache_miss_tokens: number; cache_hit_rate: number; elapsed_seconds: number; tokens_per_second: number };
-type McpServer = { name: string; transport: string; enabled: boolean; approved: boolean; command?: string | null; args?: string[] | null; cwd?: string | null; env?: string[] | null; url?: string | null; status: string; protocol_version?: string | null; server_info?: { name?: string; version?: string } };
+type McpServer = { name: string; transport: string; enabled: boolean; approved: boolean; command?: string | null; args?: string[] | null; cwd?: string | null; env?: string[] | null; url?: string | null; status: string; oauth?: boolean; oauth_client_id?: string; oauth_scopes?: string[]; protocol_version?: string | null; server_info?: { name?: string; version?: string } };
 type McpTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
-type Extension = { id: string; name: string; version: string; runtime: string; entry: string | null; contributes: string[]; permissions: string[]; enabled: boolean; status: string; package_sha256?: string | null; installed_at?: string | null };
+type Extension = { id: string; name: string; version: string; runtime: string; entry: string | null; contributes: string[]; permissions: string[]; enabled: boolean; status: string; signature_status?: string; sbom_path?: string | null; package_sha256?: string | null; installed_at?: string | null };
 type Workspace = { workspace_id: string; name: string; path: string; session_count: number };
+type PermissionRequest = { request_id: string; session_id?: string | null; subject_type: string; subject_id: string; action: string; details: Record<string, unknown>; status: string; created_at: string };
+type PermissionGrant = { grant_id: string; subject_type: string; subject_id: string; action: string; scope: string; session_id?: string | null };
+type RegistryServer = { name?: string; description?: string; server?: { name?: string; description?: string; version?: string } };
 
 const DEEPSEEK_PRESET = {
   model: "deepseek-v4-flash",
@@ -724,14 +727,21 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
   onChange(extensions: Extension[], mcpServers: McpServer[]): void;
   onError(message: string): void;
 }) {
-  const [mcpForm, setMcpForm] = useState({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false });
+  const [mcpForm, setMcpForm] = useState({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false, sandbox: true, network: false, oauth: false, oauth_client_id: "", oauth_scopes: "" });
   const [extForm, setExtForm] = useState({ id: "", name: "", runtime: "declarative", entry: "", contributes: ["tools"] as string[] });
   const [importPath, setImportPath] = useState("");
   const [importEnabled, setImportEnabled] = useState(false);
   const [mcpTools, setMcpTools] = useState<Record<string, McpTool[]>>({});
+  const [extensionTools, setExtensionTools] = useState<Record<string, McpTool[]>>({});
+  const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
+  const [permissionGrants, setPermissionGrants] = useState<PermissionGrant[]>([]);
+  const [registryQuery, setRegistryQuery] = useState("");
+  const [registryServers, setRegistryServers] = useState<RegistryServer[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ message: string; kind: "mcp" | "extension"; id: string } | null>(null);
+
+  useEffect(() => { refreshPermissions().catch(fail); }, []);
 
   async function refresh() {
     const [ext, mcp] = await Promise.all([
@@ -739,6 +749,14 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
       api<{ servers: McpServer[] }>("/v1/mcp/servers")
     ]);
     onChange(ext.extensions, mcp.servers);
+  }
+  async function refreshPermissions() {
+    const [requests, grants] = await Promise.all([
+      api<{ requests: PermissionRequest[] }>("/v1/permissions/requests?status=pending"),
+      api<{ grants: PermissionGrant[] }>("/v1/permissions/grants")
+    ]);
+    setPermissionRequests(requests.requests);
+    setPermissionGrants(grants.grants);
   }
   function fail(reason: unknown) {
     const message = friendlyError(reason);
@@ -766,10 +784,15 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
         cwd: mcpForm.transport === "stdio" ? mcpForm.cwd || undefined : undefined,
         env: mcpForm.transport === "stdio" ? mcpForm.env.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
         url: mcpForm.transport !== "stdio" ? mcpForm.url : undefined,
+        sandbox: mcpForm.transport === "stdio" ? mcpForm.sandbox : undefined,
+        network: mcpForm.transport === "stdio" ? mcpForm.network : undefined,
+        oauth: mcpForm.transport === "http" ? mcpForm.oauth : false,
+        oauth_client_id: mcpForm.transport === "http" ? mcpForm.oauth_client_id : "",
+        oauth_scopes: mcpForm.transport === "http" ? mcpForm.oauth_scopes.split(/[ ,]+/).filter(Boolean) : [],
         enabled: mcpForm.enabled,
         approved: mcpForm.approved,
       } });
-      setMcpForm({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false });
+      setMcpForm({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false, sandbox: true, network: false, oauth: false, oauth_client_id: "", oauth_scopes: "" });
       await refresh();
     } catch (reason) { fail(reason); }
     finally { setBusy(false); }
@@ -796,6 +819,61 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
       await api(`/v1/mcp/servers/${encodeURIComponent(server.name)}/connect`, { method: "POST" });
       const response = await api<{ tools: McpTool[] }>(`/v1/mcp/servers/${encodeURIComponent(server.name)}/tools`);
       setMcpTools((current) => ({ ...current, [server.name]: response.tools }));
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function authorizeMcp(server: McpServer) {
+    setBusy(true); setError("");
+    try {
+      if (!window.zagent.oauthInfo || !window.zagent.openExternal) throw new Error("OAuth 需要 Electron 桌面端");
+      const info = await window.zagent.oauthInfo();
+      const result = await api<{ authorization_url: string }>(`/v1/mcp/servers/${encodeURIComponent(server.name)}/oauth/begin`, {
+        method: "POST", body: { redirect_uri: info.redirectUri }
+      });
+      await window.zagent.openExternal(result.authorization_url);
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function connectExtension(extension: Extension) {
+    setBusy(true); setError("");
+    try {
+      await api(`/v1/extensions/${encodeURIComponent(extension.id)}/host/connect`, { method: "POST", body: {} });
+      const response = await api<{ tools: McpTool[] }>(`/v1/extensions/${encodeURIComponent(extension.id)}/host/tools`);
+      setExtensionTools((current) => ({ ...current, [extension.id]: response.tools }));
+    } catch (reason) {
+      fail(reason);
+      await refreshPermissions();
+    } finally { setBusy(false); }
+  }
+  async function decidePermission(request: PermissionRequest, decision: "approved" | "denied", scope: "once" | "session" | "always") {
+    setBusy(true); setError("");
+    try {
+      await api(`/v1/permissions/requests/${request.request_id}/decision`, { method: "POST", body: { decision, scope } });
+      await refreshPermissions();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function revokeGrant(grant: PermissionGrant) {
+    try {
+      await api(`/v1/permissions/grants/${grant.grant_id}`, { method: "DELETE" });
+      await refreshPermissions();
+    } catch (reason) { fail(reason); }
+  }
+  async function searchRegistry(event: FormEvent) {
+    event.preventDefault(); setBusy(true); setError("");
+    try {
+      const response = await api<{ servers: RegistryServer[] }>(`/v1/mcp/registry/servers?search=${encodeURIComponent(registryQuery)}&limit=20`);
+      setRegistryServers(response.servers || []);
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function importRegistry(server: RegistryServer) {
+    const name = server.server?.name || server.name;
+    if (!name) return;
+    setBusy(true); setError("");
+    try {
+      await api("/v1/mcp/registry/import", { method: "POST", body: { server_name: name, version: server.server?.version || "latest" } });
       await refresh();
     } catch (reason) { fail(reason); }
     finally { setBusy(false); }
@@ -855,7 +933,8 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
             <small>{server.url ? server.url : `${server.command || ""} ${(server.args || []).join(" ")}`.trim()}</small>
           </div>
           <span className={`badge ${server.status === "connected" ? "badge-on" : "badge-off"}`}>{server.transport} · {server.status}</span>
-          {server.transport === "stdio" && <button type="button" className="btn-ghost" disabled={busy} onClick={() => testMcp(server)}>连接并读取工具</button>}
+          {server.transport !== "sse" && <button type="button" className="btn-ghost" disabled={busy} onClick={() => testMcp(server)}>连接并读取工具</button>}
+          {server.transport === "http" && server.oauth && <button type="button" className="btn-ghost" disabled={busy} onClick={() => authorizeMcp(server)}>OAuth 授权</button>}
           <button type="button" className="btn-ghost" disabled={busy} onClick={() => updateMcp(server, { approved: !server.approved, enabled: true })}>{server.approved ? "撤销授权" : "授权给 Agent"}</button>
           <button type="button" className="btn-danger" onClick={() => setConfirmDelete({ kind: "mcp", id: server.name, message: `删除 MCP server「${server.name}」？` })}>删除</button>
           </div>
@@ -873,24 +952,55 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
               <label>允许传入的环境变量名（逗号分隔）<input value={mcpForm.env} onChange={(event) => setMcpForm({ ...mcpForm, env: event.target.value })} placeholder="DEEPSEEK_API_KEY" /></label>
             </>
           : <label>URL<input value={mcpForm.url} onChange={(event) => setMcpForm({ ...mcpForm, url: event.target.value })} placeholder="https://mcp.example.com/sse" /></label>}
+        {mcpForm.transport === "stdio" && <>
+          <label className="check-row"><input type="checkbox" checked={mcpForm.sandbox} onChange={(event) => setMcpForm({ ...mcpForm, sandbox: event.target.checked })} />启用 OS 沙箱（推荐，环境不支持时拒绝启动）</label>
+          <label className="check-row"><input type="checkbox" checked={mcpForm.network} onChange={(event) => setMcpForm({ ...mcpForm, network: event.target.checked })} />允许子进程联网</label>
+        </>}
+        {mcpForm.transport === "http" && <>
+          <label className="check-row"><input type="checkbox" checked={mcpForm.oauth} onChange={(event) => setMcpForm({ ...mcpForm, oauth: event.target.checked })} />使用 MCP OAuth</label>
+          {mcpForm.oauth && <>
+            <label>OAuth Client ID<input value={mcpForm.oauth_client_id} onChange={(event) => setMcpForm({ ...mcpForm, oauth_client_id: event.target.value })} /></label>
+            <label>Scopes（空格分隔）<input value={mcpForm.oauth_scopes} onChange={(event) => setMcpForm({ ...mcpForm, oauth_scopes: event.target.value })} placeholder="mcp:tools" /></label>
+          </>}
+        </>}
         <label className="check-row"><input type="checkbox" checked={mcpForm.enabled} onChange={(event) => setMcpForm({ ...mcpForm, enabled: event.target.checked })} />启用</label>
         <label className="check-row"><input type="checkbox" checked={mcpForm.approved} onChange={(event) => setMcpForm({ ...mcpForm, approved: event.target.checked })} />允许启动该进程并将工具暴露给 Agent</label>
-        <p className="settings-hint">MCP server 是本机进程，可能访问你的文件与网络。默认只保存配置；明确授权后才会启动。当前执行层完整支持 stdio，HTTP/SSE 仅保存配置。</p>
+        <p className="settings-hint">stdio 与 Streamable HTTP 可真实执行；旧版 SSE 仅保留兼容配置。进程默认进入 OS 沙箱，工具每次调用都经过 Permission Broker。OAuth 使用 PKCE S256，令牌不会发送到 Renderer。</p>
         {error && <div className="settings-error" role="alert">{error}</div>}
         <div className="form-actions"><button disabled={busy}>添加 MCP</button></div>
       </form>
     </section>
 
     <section className="settings-section">
+      <div className="settings-head"><h3>MCP Registry</h3></div>
+      <form className="inline-search" onSubmit={searchRegistry}>
+        <input aria-label="搜索 MCP Registry" value={registryQuery} onChange={(event) => setRegistryQuery(event.target.value)} placeholder="搜索官方 MCP Registry" />
+        <button disabled={busy}>搜索</button>
+      </form>
+      {registryServers.map((item, index) => {
+        const name = item.server?.name || item.name || `registry-${index}`;
+        return <div className="integration-card" key={name}>
+          <div className="integration-row"><div className="model-info"><strong>{name}</strong><small>{item.server?.description || item.description || item.server?.version || "官方 Registry 条目"}</small></div>
+          <button type="button" className="btn-ghost" disabled={busy} onClick={() => importRegistry(item)}>导入远程端点</button></div>
+        </div>;
+      })}
+      <p className="settings-hint">Registry 导入始终保持“未授权”；只导入声明的 Streamable HTTP remote，不自动执行 npm/pip 安装脚本。</p>
+    </section>
+
+    <section className="settings-section">
       <div className="settings-head"><h3>Z-Agent Extensions</h3></div>
       {extensions.length ? <div className="model-list">{extensions.map((ext) =>
-        <div key={ext.id} className="model-item plain">
+        <div key={ext.id} className="integration-card">
+          <div className="integration-row">
           <div className="model-info">
             <strong>{ext.name || ext.id}</strong>
-            <small>{ext.contributes.join("、") || "无贡献类型"}{ext.package_sha256 ? ` · SHA ${ext.package_sha256.slice(0, 12)}` : ""}</small>
+            <small>{ext.contributes.join("、") || "无贡献类型"} · 签名 {ext.signature_status || "unsigned"}{ext.package_sha256 ? ` · SHA ${ext.package_sha256.slice(0, 12)}` : ""}</small>
           </div>
+          {(ext.runtime === "python" || ext.runtime === "node") && <button type="button" className="btn-ghost" disabled={busy || !ext.enabled} onClick={() => connectExtension(ext)}>启动独立 Host</button>}
           <button type="button" className="btn-ghost" disabled={busy} onClick={() => toggleExtension(ext)}>{ext.enabled ? "停用" : "启用"}</button>
           <button type="button" className="btn-danger" onClick={() => setConfirmDelete({ kind: "extension", id: ext.id, message: `删除扩展「${ext.id}」？` })}>删除</button>
+          </div>
+          {extensionTools[ext.id] && <div className="integration-tools"><strong>Host 提供 {extensionTools[ext.id].length} 个工具</strong>{extensionTools[ext.id].map((tool) => <code key={tool.name}>{tool.name}</code>)}</div>}
         </div>)}</div> : <p className="muted">尚未添加扩展，可在下方添加。</p>}
       <form className="settings-form" onSubmit={importExtension}>
         <div className="settings-head"><h3>导入扩展包</h3></div>
@@ -915,6 +1025,19 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
         {error && <div className="settings-error" role="alert">{error}</div>}
         <div className="form-actions"><button disabled={busy}>添加扩展</button></div>
       </form>
+    </section>
+
+    <section className="settings-section">
+      <div className="settings-head"><h3>Permission Broker</h3><button type="button" className="btn-ghost" onClick={() => refreshPermissions().catch(fail)}>刷新</button></div>
+      {permissionRequests.length ? <div className="model-list">{permissionRequests.map((request) => <div key={request.request_id} className="integration-card">
+        <div className="integration-row"><div className="model-info"><strong>{request.subject_type} · {request.subject_id}</strong><small>{request.action} · {JSON.stringify(request.details)}</small></div>
+          <button type="button" className="btn-ghost" onClick={() => decidePermission(request, "approved", "once")}>仅这一次</button>
+          <button type="button" className="btn-ghost" disabled={!request.session_id} title={request.session_id ? "允许当前会话" : "此请求不属于会话"} onClick={() => decidePermission(request, "approved", "session")}>本会话</button>
+          <button type="button" className="btn-ghost" onClick={() => decidePermission(request, "approved", "always")}>始终允许</button>
+          <button type="button" className="btn-danger" onClick={() => decidePermission(request, "denied", "once")}>拒绝</button>
+        </div>
+      </div>)}</div> : <p className="muted">当前没有待处理授权。扩展启动和工具执行默认拒绝，并在此逐次确认。</p>}
+      {!!permissionGrants.length && <Collapsible summary={`有效授权 ${permissionGrants.length} 项`}><div className="model-list">{permissionGrants.map((grant) => <div key={grant.grant_id} className="model-item plain"><div className="model-info"><strong>{grant.subject_type} · {grant.subject_id}</strong><small>{grant.action} · {grant.scope}</small></div><button type="button" className="btn-danger" onClick={() => revokeGrant(grant)}>撤销</button></div>)}</div></Collapsible>}
     </section>
     {confirmDelete && <ConfirmDialog message={confirmDelete.message} confirmText="确认删除"
       onCancel={() => setConfirmDelete(null)} onConfirm={removeConfirmed} />}

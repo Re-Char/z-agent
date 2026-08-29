@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import re
 import threading
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from zagent.domain.errors import NotFoundError, ValidationError
 
 from .mcp_client import MCPStdioClient
+from .mcp_http import MCPStreamableHTTPClient
+from .oauth import MCPOAuthManager
 
 MCP_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -62,12 +65,28 @@ class MCPConfigRegistry:
                 "cwd": cwd,
                 "env": env,
                 "timeout_seconds": timeout_seconds,
+                "sandbox": bool(spec.get("sandbox", True)),
+                "sandbox_read_roots": [str(item) for item in spec.get("sandbox_read_roots", [])],
+                "sandbox_write_roots": [str(item) for item in spec.get("sandbox_write_roots", [])],
+                "network": bool(spec.get("network", False)),
             }
         else:
             url = str(spec.get("url", "")).strip()
             if not url.startswith(("http://", "https://")):
                 raise ValidationError("http/sse servers require an http(s) url")
-            config = {"transport": transport, "url": url}
+            timeout_seconds = float(spec.get("timeout_seconds", 30.0))
+            if not 0.1 <= timeout_seconds <= 300:
+                raise ValidationError("MCP timeout_seconds must be between 0.1 and 300")
+            config = {
+                "transport": transport,
+                "url": url,
+                "timeout_seconds": timeout_seconds,
+                "oauth": bool(spec.get("oauth", False)),
+                "oauth_client_id": str(spec.get("oauth_client_id", "")),
+                "oauth_scopes": [str(item) for item in spec.get("oauth_scopes", [])],
+                "oauth_redirect_uri": str(spec.get("oauth_redirect_uri", "")),
+                "registry": spec.get("registry") if isinstance(spec.get("registry"), dict) else None,
+            }
         config["enabled"] = bool(spec.get("enabled", True))
         config["approved"] = bool(spec.get("approved", False))
         with self._lock:
@@ -111,8 +130,8 @@ class MCPConfigRegistry:
             status = "disabled"
         elif not approved:
             status = "approval_required"
-        elif transport != "stdio":
-            status = "transport_not_implemented"
+        elif transport == "sse":
+            status = "legacy_transport_unsupported"
         else:
             status = "ready"
         return {
@@ -124,8 +143,23 @@ class MCPConfigRegistry:
             "args": list(config.get("args", [])) if transport == "stdio" else None,
             "cwd": config.get("cwd") if transport == "stdio" else None,
             "env": list(config.get("env", [])) if transport == "stdio" else None,
-            "timeout_seconds": config.get("timeout_seconds", 15.0) if transport == "stdio" else None,
+            "timeout_seconds": config.get("timeout_seconds", 15.0),
+            "sandbox": bool(config.get("sandbox", True)) if transport == "stdio" else None,
+            "sandbox_read_roots": list(config.get("sandbox_read_roots", []))
+            if transport == "stdio"
+            else None,
+            "sandbox_write_roots": list(config.get("sandbox_write_roots", []))
+            if transport == "stdio"
+            else None,
+            "network": bool(config.get("network", False)) if transport == "stdio" else True,
             "url": config.get("url") if transport != "stdio" else None,
+            "oauth": bool(config.get("oauth", False)) if transport != "stdio" else False,
+            "oauth_client_id": config.get("oauth_client_id", "") if transport != "stdio" else "",
+            "oauth_scopes": list(config.get("oauth_scopes", [])) if transport != "stdio" else [],
+            "oauth_redirect_uri": config.get("oauth_redirect_uri", "")
+            if transport != "stdio"
+            else "",
+            "registry": config.get("registry") if transport != "stdio" else None,
             "status": status,
         }
 
@@ -151,9 +185,12 @@ class MCPConfigRegistry:
 class MCPManager:
     """Owns MCP client processes and requires explicit approval before execution."""
 
-    def __init__(self, registry: MCPConfigRegistry) -> None:
+    def __init__(
+        self, registry: MCPConfigRegistry, oauth: Optional[MCPOAuthManager] = None
+    ) -> None:
         self.registry = registry
-        self._clients: Dict[str, MCPStdioClient] = {}
+        self.oauth = oauth
+        self._clients: Dict[str, Any] = {}
         self._lock = threading.RLock()
 
     def list_servers(self) -> List[Dict[str, Any]]:
@@ -188,18 +225,36 @@ class MCPManager:
     def connect(self, name: str) -> Dict[str, Any]:
         server = self.registry.get_server(name)
         self._require_execution_allowed(server)
-        if server["transport"] != "stdio":
-            raise ValidationError("only MCP stdio execution is implemented in this V2 slice")
+        if server["transport"] == "sse":
+            raise ValidationError("legacy MCP SSE transport is not supported; use Streamable HTTP")
         with self._lock:
             client = self._clients.get(name)
             if client is None:
-                client = MCPStdioClient(
-                    server["command"],
-                    server["args"] or [],
-                    cwd=server.get("cwd"),
-                    env_names=server.get("env") or [],
-                    timeout_seconds=float(server.get("timeout_seconds") or 15.0),
-                )
+                if server["transport"] == "stdio":
+                    client = MCPStdioClient(
+                        server["command"],
+                        server["args"] or [],
+                        cwd=server.get("cwd"),
+                        env_names=server.get("env") or [],
+                        timeout_seconds=float(server.get("timeout_seconds") or 15.0),
+                        sandbox=bool(server.get("sandbox", True)),
+                        sandbox_read_roots=server.get("sandbox_read_roots") or [],
+                        sandbox_write_roots=server.get("sandbox_write_roots") or [],
+                        network=bool(server.get("network", False)),
+                    )
+                else:
+                    if server.get("oauth") and self.oauth is None:
+                        raise ValidationError("MCP OAuth manager is unavailable")
+                    token_provider = (
+                        partial(self.oauth.access_token, name)
+                        if server.get("oauth") and self.oauth
+                        else None
+                    )
+                    client = MCPStreamableHTTPClient(
+                        server["url"],
+                        timeout_seconds=float(server.get("timeout_seconds") or 30.0),
+                        token_provider=token_provider,
+                    )
                 self._clients[name] = client
             try:
                 info = client.connect()
@@ -231,7 +286,7 @@ class MCPManager:
         for client in clients:
             client.close()
 
-    def _connected_client(self, name: str) -> MCPStdioClient:
+    def _connected_client(self, name: str) -> Any:
         server = self.registry.get_server(name)
         self._require_execution_allowed(server)
         with self._lock:

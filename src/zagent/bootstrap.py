@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from zagent.agent.extension_tools import ExtensionToolExecutor
 from zagent.agent.fs_tools import FileSystemToolExecutor
 from zagent.agent.mcp_tools import MCPToolExecutor
 from zagent.agent.runtime import AgentRuntime, AgentRuntimeLimits
@@ -11,10 +12,17 @@ from zagent.config import AppSettings
 from zagent.context.orchestrator import ContextOrchestrator
 from zagent.context.working_set import WorkingSetBuilder
 from zagent.domain.errors import NotFoundError
-from zagent.extensions import ExtensionRegistry, MCPConfigRegistry, MCPManager
+from zagent.extensions import (
+    ExtensionHostManager,
+    ExtensionRegistry,
+    MCPConfigRegistry,
+    MCPManager,
+    MCPRegistryClient,
+)
+from zagent.extensions.oauth import MCPOAuthManager
 from zagent.providers import EchoProvider, OpenAICompatibleProvider
 from zagent.providers.base import ModelProvider
-from zagent.security import SecretStore
+from zagent.security import PermissionBroker, SecretStore
 from zagent.storage import SqliteStore
 
 
@@ -26,8 +34,14 @@ class ApplicationContainer:
         self.settings = AppSettings.load(data_dir)
         self.store = SqliteStore(self.settings.data_dir, self.settings.blob_threshold)
         self.secrets = SecretStore(self.settings.data_dir)
+        self.permissions = PermissionBroker(self.store)
         self.extensions = ExtensionRegistry(self.settings.data_dir, self.project_dir)
-        self.mcp = MCPManager(MCPConfigRegistry(self.settings.data_dir))
+        self.extension_hosts = ExtensionHostManager(
+            self.extensions, self.permissions, self.settings.data_dir
+        )
+        self.oauth = MCPOAuthManager(self.settings.data_dir, self.secrets)
+        self.mcp = MCPManager(MCPConfigRegistry(self.settings.data_dir), self.oauth)
+        self.mcp_registry = MCPRegistryClient()
         self._provider: Optional[ModelProvider] = None
         self._build_runtime()
 
@@ -45,7 +59,8 @@ class ApplicationContainer:
         tools = CombinedToolExecutor(
             ContextToolExecutor(self.context),
             FileSystemToolExecutor(self._workspace_path_for),
-            MCPToolExecutor(self.mcp),
+            MCPToolExecutor(self.mcp, self.permissions),
+            ExtensionToolExecutor(self.extensions, self.extension_hosts),
         )
         self.agent = AgentRuntime(
             self.store,
@@ -131,5 +146,8 @@ class ApplicationContainer:
 
     def close(self) -> None:
         self._close_provider()
+        self.extension_hosts.close()
         self.mcp.close()
+        self.oauth.close()
+        self.mcp_registry.close()
         self.store.close()

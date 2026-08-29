@@ -700,6 +700,252 @@ class SqliteStore:
         ).fetchone()
         return dict(row)
 
+    # --- permission broker -------------------------------------------------
+
+    @_serialized
+    def create_permission_request(
+        self,
+        session_id: Optional[str],
+        subject_type: str,
+        subject_id: str,
+        action: str,
+        arguments_sha256: str,
+        details: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if session_id:
+            self.get_session(session_id)
+        existing = self._db.execute(
+            """SELECT * FROM permission_requests
+               WHERE status='pending' AND session_id IS ? AND subject_type=?
+                 AND subject_id=? AND action=? AND arguments_sha256=?
+               ORDER BY created_at DESC LIMIT 1""",
+            (session_id, subject_type, subject_id, action, arguments_sha256),
+        ).fetchone()
+        if existing is not None:
+            return self._permission_request(existing)
+        request_id = "prm_" + uuid.uuid4().hex
+        created_at = self._now()
+        with self._db:
+            self._db.execute(
+                """INSERT INTO permission_requests(
+                       request_id,session_id,subject_type,subject_id,action,arguments_sha256,
+                       details_json,status,scope,created_at,decided_at,consumed_at
+                   ) VALUES(?,?,?,?,?,?,?,'pending',NULL,?,NULL,NULL)""",
+                (
+                    request_id,
+                    session_id,
+                    subject_type,
+                    subject_id,
+                    action,
+                    arguments_sha256,
+                    json.dumps(details, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            self._insert_permission_audit(
+                request_id,
+                session_id,
+                subject_type,
+                subject_id,
+                action,
+                "pending",
+                "agent",
+            )
+        return self.get_permission_request(request_id)
+
+    @_serialized
+    def get_permission_request(self, request_id: str) -> Dict[str, Any]:
+        row = self._db.execute(
+            "SELECT * FROM permission_requests WHERE request_id=?", (request_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("permission request not found")
+        return self._permission_request(row)
+
+    @_serialized
+    def list_permission_requests(self, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        if status:
+            rows = self._db.execute(
+                "SELECT * FROM permission_requests WHERE status=? ORDER BY created_at DESC",
+                (status,),
+            ).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM permission_requests ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._permission_request(row) for row in rows]
+
+    @_serialized
+    def decide_permission_request(
+        self, request_id: str, decision: str, scope: str = "once"
+    ) -> Dict[str, Any]:
+        if decision not in {"approved", "denied"}:
+            raise ValidationError("permission decision must be approved or denied")
+        if scope not in {"once", "session", "always"}:
+            raise ValidationError("permission scope must be once, session, or always")
+        request = self.get_permission_request(request_id)
+        if request["status"] != "pending":
+            raise ValidationError("permission request was already decided")
+        if scope == "session" and not request["session_id"]:
+            raise ValidationError("session permission requires a session")
+        decided_at = self._now()
+        with self._db:
+            self._db.execute(
+                """UPDATE permission_requests SET status=?, scope=?, decided_at=?
+                   WHERE request_id=? AND status='pending'""",
+                (decision, scope, decided_at, request_id),
+            )
+            if decision == "approved" and scope in {"session", "always"}:
+                self._db.execute(
+                    """INSERT INTO permission_grants(
+                           grant_id,subject_type,subject_id,action,scope,session_id,created_at,revoked_at
+                       ) VALUES(?,?,?,?,?,?,?,NULL)""",
+                    (
+                        "grt_" + uuid.uuid4().hex,
+                        request["subject_type"],
+                        request["subject_id"],
+                        request["action"],
+                        scope,
+                        request["session_id"] if scope == "session" else None,
+                        decided_at,
+                    ),
+                )
+            self._insert_permission_audit(
+                request_id,
+                request["session_id"],
+                request["subject_type"],
+                request["subject_id"],
+                request["action"],
+                decision,
+                "user",
+            )
+        return self.get_permission_request(request_id)
+
+    @_serialized
+    def consume_permission(
+        self,
+        session_id: Optional[str],
+        subject_type: str,
+        subject_id: str,
+        action: str,
+        arguments_sha256: str,
+    ) -> Optional[Dict[str, Any]]:
+        grant = self._db.execute(
+            """SELECT * FROM permission_grants
+               WHERE subject_type=? AND subject_id=? AND action=? AND revoked_at IS NULL
+                 AND (scope='always' OR (scope='session' AND session_id=?))
+               ORDER BY CASE scope WHEN 'session' THEN 0 ELSE 1 END, created_at DESC LIMIT 1""",
+            (subject_type, subject_id, action, session_id),
+        ).fetchone()
+        if grant is not None:
+            with self._db:
+                self._insert_permission_audit(
+                    None,
+                    session_id,
+                    subject_type,
+                    subject_id,
+                    action,
+                    "allowed",
+                    f"grant:{grant['scope']}",
+                )
+            return {"source": "grant", "scope": grant["scope"], "grant_id": grant["grant_id"]}
+        request = self._db.execute(
+            """SELECT * FROM permission_requests
+               WHERE status='approved' AND scope='once' AND consumed_at IS NULL
+                 AND session_id IS ? AND subject_type=? AND subject_id=? AND action=?
+                 AND arguments_sha256=? ORDER BY decided_at DESC LIMIT 1""",
+            (session_id, subject_type, subject_id, action, arguments_sha256),
+        ).fetchone()
+        if request is None:
+            return None
+        consumed_at = self._now()
+        with self._db:
+            self._db.execute(
+                "UPDATE permission_requests SET status='consumed', consumed_at=? WHERE request_id=?",
+                (consumed_at, request["request_id"]),
+            )
+            self._insert_permission_audit(
+                request["request_id"],
+                session_id,
+                subject_type,
+                subject_id,
+                action,
+                "allowed",
+                "grant:once",
+            )
+        return {"source": "request", "scope": "once", "request_id": request["request_id"]}
+
+    @_serialized
+    def revoke_permission_grant(self, grant_id: str) -> bool:
+        grant = self._db.execute(
+            "SELECT * FROM permission_grants WHERE grant_id=? AND revoked_at IS NULL",
+            (grant_id,),
+        ).fetchone()
+        if grant is None:
+            return False
+        with self._db:
+            cursor = self._db.execute(
+                "UPDATE permission_grants SET revoked_at=? WHERE grant_id=? AND revoked_at IS NULL",
+                (self._now(), grant_id),
+            )
+            self._insert_permission_audit(
+                None,
+                grant["session_id"],
+                grant["subject_type"],
+                grant["subject_id"],
+                grant["action"],
+                "revoked",
+                "user",
+            )
+        return cursor.rowcount == 1
+
+    @_serialized
+    def list_permission_grants(self) -> List[Dict[str, Any]]:
+        rows = self._db.execute(
+            "SELECT * FROM permission_grants WHERE revoked_at IS NULL ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    @_serialized
+    def list_permission_audit(self, limit: int = 200) -> List[Dict[str, Any]]:
+        rows = self._db.execute(
+            "SELECT * FROM permission_audit ORDER BY timestamp DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def _insert_permission_audit(
+        self,
+        request_id: Optional[str],
+        session_id: Optional[str],
+        subject_type: str,
+        subject_id: str,
+        action: str,
+        outcome: str,
+        source: str,
+    ) -> None:
+        self._db.execute(
+            """INSERT INTO permission_audit(
+                   audit_id,request_id,session_id,subject_type,subject_id,action,outcome,source,timestamp
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                "aud_" + uuid.uuid4().hex,
+                request_id,
+                session_id,
+                subject_type,
+                subject_id,
+                action,
+                outcome,
+                source,
+                self._now(),
+            ),
+        )
+
+    @staticmethod
+    def _permission_request(row: sqlite3.Row) -> Dict[str, Any]:
+        result = dict(row)
+        result["details"] = json.loads(result.pop("details_json"))
+        return result
+
     @_serialized
     def close(self) -> None:
         self._db.close()

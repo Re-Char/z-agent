@@ -10,6 +10,8 @@ from zagent.agent.runtime import AgentRuntime
 from zagent.domain.errors import ValidationError
 from zagent.domain.models import ModelResponse, ToolCall
 from zagent.extensions.mcp import MCPConfigRegistry, MCPManager
+from zagent.security.permissions import PermissionBroker
+from zagent.storage import SqliteStore
 
 SERVER = Path(__file__).parents[1] / "fixtures" / "mcp_echo_server.py"
 
@@ -26,6 +28,7 @@ def test_real_stdio_server_initialize_list_call_and_restart(tmp_path):
                 "args": [str(SERVER)],
                 "enabled": True,
                 "approved": True,
+                "sandbox": False,
             }
         )
         assert configured["status"] == "ready"
@@ -80,16 +83,23 @@ def test_approved_mcp_tool_is_exposed_to_native_agent_tool_loop(tmp_path):
                 "command": sys.executable,
                 "args": [str(SERVER)],
                 "approved": True,
+                "sandbox": False,
             }
         )
-        executor = MCPToolExecutor(manager)
+        permission_store = SqliteStore(str(tmp_path / "permissions"))
+        broker = PermissionBroker(permission_store)
+        executor = MCPToolExecutor(manager, broker)
         schema = executor.schemas[0]
         alias = schema["function"]["name"]
         assert alias == "mcp_agent-echo_echo"
         assert schema["function"]["parameters"]["required"] == ["text"]
-        result = executor.execute("session-unused", alias, {"text": "模型工具链"})
+        broker.approve_inline_once(
+            None, "mcp", "agent-echo", "tool:echo", {"text": "模型工具链"}
+        )
+        result = executor.execute("", alias, {"text": "模型工具链"})
         assert result["mcp_server"] == "agent-echo"
         assert result["result"]["structuredContent"]["echo"] == "模型工具链"
+        permission_store.close()
     finally:
         manager.close()
 
@@ -124,10 +134,15 @@ def test_native_agent_loop_invokes_real_mcp_subprocess(tmp_path, store, session_
                 "command": sys.executable,
                 "args": [str(SERVER)],
                 "approved": True,
+                "sandbox": False,
             }
         )
         provider = MCPSequenceProvider()
-        runtime = AgentRuntime(store, context, provider, MCPToolExecutor(manager))
+        broker = PermissionBroker(store)
+        broker.approve_inline_once(
+            session_id, "mcp", "loop-echo", "tool:echo", {"text": "Agent loop"}
+        )
+        runtime = AgentRuntime(store, context, provider, MCPToolExecutor(manager, broker))
         result = runtime.send(session_id, "请调用 MCP echo")
         assert result.final_event.payload == "MCP 工具调用完成"
         assert provider.seen_tools[0][0]["function"]["name"] == "mcp_loop-echo_echo"

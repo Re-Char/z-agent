@@ -249,6 +249,8 @@ describe("Z-Agent desktop UI", () => {
       }
       if (path === "/v1/mcp/servers/echo/connect" && options?.method === "POST") return { connected: true };
       if (path === "/v1/mcp/servers/echo/tools") return { tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object" } }] };
+      if (path === "/v1/permissions/requests?status=pending") return { requests: [] };
+      if (path === "/v1/permissions/grants") return { grants: [] };
       throw new Error(`unexpected path: ${path}`);
     }) as ZAgentBridge["request"];
 
@@ -263,5 +265,42 @@ describe("Z-Agent desktop UI", () => {
     fireEvent.click(screen.getByRole("button", { name: "连接并读取工具" }));
     await waitFor(() => expect(screen.getByText("已发现 1 个工具")).toBeInTheDocument());
     expect(screen.getByText("echo", { selector: "code" })).toBeInTheDocument();
+  });
+
+  it("reviews per-action permissions and imports a registry remote without auto-approval", async () => {
+    let decided = false;
+    let imported = false;
+    window.zagent.request = vi.fn(async (path: string, options) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 0 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [] };
+      if (path === "/v1/extensions") return { extensions: [] };
+      if (path === "/v1/mcp/servers") return { servers: imported ? [{ name: "registry-echo", transport: "http", enabled: true, approved: false, url: "https://mcp.example/mcp", status: "approval_required" }] : [] };
+      if (path === "/v1/permissions/requests?status=pending") return { requests: decided ? [] : [{ request_id: "prm_1", subject_type: "extension", subject_id: "com.example.echo", action: "tool:write", details: { path: "README.md" }, status: "pending", created_at: new Date().toISOString() }] };
+      if (path === "/v1/permissions/grants") return { grants: [] };
+      if (path === "/v1/permissions/requests/prm_1/decision" && options?.method === "POST") {
+        expect(options.body).toEqual({ decision: "approved", scope: "once" });
+        decided = true;
+        return { request: { status: "approved" } };
+      }
+      if (path.startsWith("/v1/mcp/registry/servers?")) return { servers: [{ server: { name: "io.example/echo", description: "Echo MCP", version: "1.0.0" } }] };
+      if (path === "/v1/mcp/registry/import" && options?.method === "POST") {
+        expect(options.body).toEqual({ server_name: "io.example/echo", version: "1.0.0" });
+        imported = true;
+        return { server: { approved: false } };
+      }
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "扩展与 MCP" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仅这一次" }));
+    await waitFor(() => expect(screen.getByText(/当前没有待处理授权/)).toBeInTheDocument());
+    fireEvent.change(screen.getByLabelText("搜索 MCP Registry"), { target: { value: "echo" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() => expect(screen.getByText("io.example/echo")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "导入远程端点" }));
+    await waitFor(() => expect(screen.getByText("registry-echo")).toBeInTheDocument());
+    expect(screen.getByText(/approval_required/)).toBeInTheDocument();
   });
 });
