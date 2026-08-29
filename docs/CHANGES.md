@@ -14,6 +14,7 @@
 | 流式输出（SSE） | ✅ | `providers/openai_compatible.py`、`agent/runtime.py`、`api/app.py`、`apps/desktop/*` |
 | 上下文管理修复 | ✅ | `context/working_set.py`、`context/orchestrator.py`、`storage/sqlite_store.py` |
 | 前端交互打磨 | ✅ | `App.tsx`、`styles.css`、`Markdown.tsx`（新） |
+| 扩展安全导入 + MCP stdio | ✅ v2 切片 | `extensions/manifest.py`、`extensions/mcp*.py`、`agent/mcp_tools.py` |
 | 回归测试 + 验证报告 | ✅ | `tests/**`、`docs/verification-report.md` |
 
 ## 各主题详情
@@ -138,10 +139,21 @@
 - 工具 result event 与 invocation completed 在同一 SQLite 事务落库；覆盖 replay、参数冲突和崩溃窗口三类回归。
 - 新 checkpoint 会 supersede 同 session 的旧未解决 checkpoint；故障注入测试连续 3 次暂停后完成，旧恢复点不会重新浮现。
 
+### 18. v0.2.0 扩展安全导入与受管 MCP stdio
+
+- 项目版本统一提升到 `0.2.0`；这表示进入 v2 开发，不表示 v2 全部完成。
+- 扩展支持真实目录与 ZIP 导入：拒绝路径穿越、符号链接、加密 ZIP、超大文件/包和多根 manifest；在安装根暂存校验后原子落盘，覆盖升级失败可恢复旧版本。
+- 每个安装记录内容 SHA-256、来源类型/名称与 UTC 安装时间；启用状态、安装元数据和包内容均可在 Core 重启后恢复。
+- 自研 MCP stdio JSON-RPC 客户端实现 `initialize`、版本协商、`notifications/initialized`、分页 `tools/list`、`tools/call`、超时取消、4 MiB 帧限制、stderr 限额和分级进程关闭，不依赖 MCP/Agent SDK。
+- MCP 配置区分 `enabled` 与 `approved`；命令以参数数组直接启动且不经过 shell，环境变量只按名称 allowlist 传入。批准的工具以命名空间别名加入原生 Agent tool-calling loop。
+- Electron 增加扩展目录/ZIP 原生选择器、包 SHA 展示、启停、MCP 授权、连接测试和工具清单；HTTP/SSE 会明确显示当前只保存配置。
+- 真实验收使用运行中的 Core HTTP API 导入中文扩展，启动独立 MCP server 子进程，协商 `2025-11-25`，发现并调用 `echo`；Core 重启后再次恢复扩展与 MCP 工具。
+
 ## 验证状态
 
-- Python：**131 个测试通过**，覆盖率 **85.50%**（门槛 80%），Ruff 全绿
-- 前端：**10 个 Vitest 测试** + strict typecheck + Vite production build 全绿
+- Python：**139 个测试通过**，分支覆盖率 **82.65%**（门槛 80%），Ruff 全绿
+- 前端：**11 个 Vitest 测试** + strict typecheck + Vite production build 全绿
+- 扩展/MCP E2E：真实 Core HTTP → 安全导入 → MCP stdio 子进程 → 工具调用 → Core 重启恢复通过
 - E2E（真实 DeepSeek）：从空工作区创建项目 → 外部测试反馈修复 → 归档/固定 → 二阶段扩展 → 44/44 项目测试与安装级验证
 - 详细验证记录：`docs/verification-report.md`（12 轮迭代逐项记录）
 

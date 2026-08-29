@@ -1,5 +1,4 @@
 from .manifest import ExtensionManifest, ExtensionRegistry
-from .mcp import MCPConfigRegistry
+from .mcp import MCPConfigRegistry, MCPManager
 
-__all__ = ["ExtensionManifest", "ExtensionRegistry", "MCPConfigRegistry"]
-
+__all__ = ["ExtensionManifest", "ExtensionRegistry", "MCPConfigRegistry", "MCPManager"]

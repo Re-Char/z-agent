@@ -383,3 +383,15 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - invocation claim 和 result 事务在 SQLite 持久，结果 event 与 completed 状态原子提交。
 - 同一 session 的确定性故障注入连续生成 3 个 checkpoint，前两个分别由新 checkpoint event supersede，最终回复解决最后一个，完成后 active checkpoint 为空。
 - 全仓回归更新为 131 个 Python 测试；受控 Runner、真实 provider 三次 checkpoint 长任务和模型/工具 schema 缓存键仍未标记完成。
+
+## 18. v0.2.0 扩展与 MCP 真实导入验收（2026-08-29）
+
+- 扩展包：真实中文 declarative 扩展从目录经 Core HTTP API 安装，返回内容 SHA-256 与 UTC 安装时间；目录与 ZIP 两种路径均有自动化覆盖。
+- 安全输入：路径穿越 ZIP、符号链接、加密 ZIP、单文件/总大小/文件数超限、重复安装和 entry integrity 失败均在落盘前拒绝；覆盖更新先保留旧目录，原子替换失败可回滚。
+- 防篡改可见性：启停状态存入安装元数据而不修改包；发现时重算内容摘要，内容变化显示 `package_modified`。
+- MCP transport：运行中的 Core 启动独立 Python stdio server，完成 `initialize`、`notifications/initialized`、`tools/list` 与 `tools/call`，协商版本 `2025-11-25`，中文参数与结果无损返回。
+- Agent loop：假模型发出 namespaced MCP tool call，AgentRuntime 经真实子进程执行，将结果写成 tool event 并送入下一模型轮；该调用同时受既有 call ID 幂等保护。
+- 重启恢复：关闭 Core 后使用同一临时数据目录重启，扩展的 enabled/hash/install time 与 MCP enabled/approved 配置恢复；首次工具访问按需重新启动 server，不增加 Core 冷启动进程。
+- GUI：Vitest 覆盖 Electron 原生路径选择返回值、扩展安全导入、SHA 展示、MCP 授权、连接和工具清单；真实 Electron 开发窗口启动与布局截图通过，Computer Use 点击通道不可用，因此没有把自动点击结果冒充为通过。
+- 最终门禁：139 个 Python 测试、82.65% 分支覆盖率、11 个 Vitest、Ruff、TypeScript、Vite production build、Electron main/preload 语法检查全部通过。
+- 未完成边界：Node/Python Extension Host、逐次 Permission Broker、Streamable HTTP/OAuth、MCP Registry、Open VSX/VSIX、SBOM/签名和 OS 沙箱仍属于 v2 后续。

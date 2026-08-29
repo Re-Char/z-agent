@@ -1,0 +1,11 @@
+{
+  "id": "com.zagent.fixture.chinese-skill",
+  "name": "中文扩展导入验收",
+  "version": "2.0.0",
+  "runtime": "declarative",
+  "entry": "skill.md",
+  "contributes": [
+    "skills"
+  ],
+  "permissions": []
+}

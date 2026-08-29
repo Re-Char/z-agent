@@ -221,4 +221,47 @@ describe("Z-Agent desktop UI", () => {
     expect(input).toHaveValue("请检查代码");
     expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
   });
+
+  it("imports an extension package and tests a real MCP connection from the desktop modal", async () => {
+    let imported = false;
+    let approved = false;
+    window.zagent.selectExtension = vi.fn(async () => "/tmp/real-extension.zip");
+    window.zagent.request = vi.fn(async (path: string, options) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 0 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [] };
+      if (path === "/v1/extensions" && !options?.method) return { extensions: imported ? [{
+        id: "com.example.real", name: "真实扩展", version: "2.0.0", runtime: "declarative", entry: null,
+        contributes: ["skills"], permissions: [], enabled: false, status: "installed", package_sha256: "a".repeat(64),
+      }] : [] };
+      if (path === "/v1/extensions/import" && options?.method === "POST") {
+        expect(options.body).toEqual({ source_path: "/tmp/real-extension.zip", enabled: false });
+        imported = true;
+        return { extension: {} };
+      }
+      if (path === "/v1/mcp/servers" && !options?.method) return { servers: [{
+        name: "echo", transport: "stdio", enabled: true, approved, command: "python", args: ["server.py"],
+        status: approved ? "connected" : "approval_required",
+      }] };
+      if (path === "/v1/mcp/servers/echo" && options?.method === "PATCH") {
+        approved = true;
+        return { server: {} };
+      }
+      if (path === "/v1/mcp/servers/echo/connect" && options?.method === "POST") return { connected: true };
+      if (path === "/v1/mcp/servers/echo/tools") return { tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object" } }] };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "扩展与 MCP" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择…" }));
+    await waitFor(() => expect(screen.getByLabelText("扩展根目录或 ZIP")).toHaveValue("/tmp/real-extension.zip"));
+    fireEvent.click(screen.getByRole("button", { name: "安全导入" }));
+    await waitFor(() => expect(screen.getByText("真实扩展")).toBeInTheDocument());
+    expect(screen.getByText(/SHA aaaaaaaaaaaa/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "连接并读取工具" }));
+    await waitFor(() => expect(screen.getByText("已发现 1 个工具")).toBeInTheDocument());
+    expect(screen.getByText("echo", { selector: "code" })).toBeInTheDocument();
+  });
 });

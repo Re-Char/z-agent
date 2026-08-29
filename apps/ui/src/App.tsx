@@ -8,8 +8,9 @@ type ContextStatus = { stats: { count: number; tokens: number }; working_set: { 
 type ModelConfig = { id: string; name: string; provider: string; model: string; base_url: string; context_window: number; soft_limit_ratio: number; hard_limit_ratio: number };
 type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string };
 type TokenStats = { total_tokens: number; completion_tokens: number; cache_hit_tokens: number; cache_miss_tokens: number; cache_hit_rate: number; elapsed_seconds: number; tokens_per_second: number };
-type McpServer = { name: string; transport: string; enabled: boolean; command?: string | null; args?: string[] | null; url?: string | null; status: string };
-type Extension = { id: string; name: string; version: string; runtime: string; entry: string | null; contributes: string[]; permissions: string[]; enabled: boolean; status: string };
+type McpServer = { name: string; transport: string; enabled: boolean; approved: boolean; command?: string | null; args?: string[] | null; cwd?: string | null; env?: string[] | null; url?: string | null; status: string; protocol_version?: string | null; server_info?: { name?: string; version?: string } };
+type McpTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
+type Extension = { id: string; name: string; version: string; runtime: string; entry: string | null; contributes: string[]; permissions: string[]; enabled: boolean; status: string; package_sha256?: string | null; installed_at?: string | null };
 type Workspace = { workspace_id: string; name: string; path: string; session_count: number };
 
 const DEEPSEEK_PRESET = {
@@ -723,8 +724,11 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
   onChange(extensions: Extension[], mcpServers: McpServer[]): void;
   onError(message: string): void;
 }) {
-  const [mcpForm, setMcpForm] = useState({ name: "", transport: "stdio", command: "", args: "", url: "", enabled: true });
+  const [mcpForm, setMcpForm] = useState({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false });
   const [extForm, setExtForm] = useState({ id: "", name: "", runtime: "declarative", entry: "", contributes: ["tools"] as string[] });
+  const [importPath, setImportPath] = useState("");
+  const [importEnabled, setImportEnabled] = useState(false);
+  const [mcpTools, setMcpTools] = useState<Record<string, McpTool[]>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmDelete, setConfirmDelete] = useState<{ message: string; kind: "mcp" | "extension"; id: string } | null>(null);
@@ -759,10 +763,39 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
         name: mcpForm.name, transport: mcpForm.transport,
         command: mcpForm.transport === "stdio" ? mcpForm.command : undefined,
         args: mcpForm.transport === "stdio" ? mcpForm.args.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
+        cwd: mcpForm.transport === "stdio" ? mcpForm.cwd || undefined : undefined,
+        env: mcpForm.transport === "stdio" ? mcpForm.env.split(",").map((item) => item.trim()).filter(Boolean) : undefined,
         url: mcpForm.transport !== "stdio" ? mcpForm.url : undefined,
         enabled: mcpForm.enabled,
+        approved: mcpForm.approved,
       } });
-      setMcpForm({ name: "", transport: "stdio", command: "", args: "", url: "", enabled: true });
+      setMcpForm({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false });
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function updateMcp(server: McpServer, patch: { enabled?: boolean; approved?: boolean }) {
+    setBusy(true); setError("");
+    try {
+      await api(`/v1/mcp/servers/${encodeURIComponent(server.name)}`, { method: "PATCH", body: patch });
+      if (patch.enabled === false || patch.approved === false) {
+        setMcpTools((current) => { const next = { ...current }; delete next[server.name]; return next; });
+      }
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function testMcp(server: McpServer) {
+    setBusy(true); setError("");
+    try {
+      if (!server.approved) {
+        await api(`/v1/mcp/servers/${encodeURIComponent(server.name)}`, {
+          method: "PATCH", body: { approved: true, enabled: true },
+        });
+      }
+      await api(`/v1/mcp/servers/${encodeURIComponent(server.name)}/connect`, { method: "POST" });
+      const response = await api<{ tools: McpTool[] }>(`/v1/mcp/servers/${encodeURIComponent(server.name)}/tools`);
+      setMcpTools((current) => ({ ...current, [server.name]: response.tools }));
       await refresh();
     } catch (reason) { fail(reason); }
     finally { setBusy(false); }
@@ -780,6 +813,28 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
     } catch (reason) { fail(reason); }
     finally { setBusy(false); }
   }
+  async function importExtension(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true); setError("");
+    try {
+      await api("/v1/extensions/import", { method: "POST", body: {
+        source_path: importPath, enabled: importEnabled,
+      } });
+      setImportPath(""); setImportEnabled(false);
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function toggleExtension(extension: Extension) {
+    setBusy(true); setError("");
+    try {
+      await api(`/v1/extensions/${encodeURIComponent(extension.id)}`, {
+        method: "PATCH", body: { enabled: !extension.enabled },
+      });
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
   function toggleContribution(value: string) {
     setExtForm((current) => ({
       ...current,
@@ -793,13 +848,18 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
     <section className="settings-section">
       <div className="settings-head"><h3>MCP Servers</h3></div>
       {mcpServers.length ? <div className="model-list">{mcpServers.map((server) =>
-        <div key={server.name} className="model-item plain">
+        <div key={server.name} className="integration-card">
+          <div className="integration-row">
           <div className="model-info">
             <strong>{server.name}</strong>
             <small>{server.url ? server.url : `${server.command || ""} ${(server.args || []).join(" ")}`.trim()}</small>
           </div>
-          <span className={`badge ${server.enabled ? "badge-on" : "badge-off"}`}>{server.transport}{server.enabled ? " · 启用" : " · 停用"}</span>
+          <span className={`badge ${server.status === "connected" ? "badge-on" : "badge-off"}`}>{server.transport} · {server.status}</span>
+          {server.transport === "stdio" && <button type="button" className="btn-ghost" disabled={busy} onClick={() => testMcp(server)}>连接并读取工具</button>}
+          <button type="button" className="btn-ghost" disabled={busy} onClick={() => updateMcp(server, { approved: !server.approved, enabled: true })}>{server.approved ? "撤销授权" : "授权给 Agent"}</button>
           <button type="button" className="btn-danger" onClick={() => setConfirmDelete({ kind: "mcp", id: server.name, message: `删除 MCP server「${server.name}」？` })}>删除</button>
+          </div>
+          {mcpTools[server.name] && <div className="integration-tools"><strong>已发现 {mcpTools[server.name].length} 个工具</strong>{mcpTools[server.name].map((tool) => <code key={tool.name}>{tool.name}</code>)}</div>}
         </div>)}</div> : <p className="muted">尚未配置 MCP server，可在下方添加。</p>}
       <form className="settings-form" onSubmit={addMcp}>
         <div className="settings-head"><h3>添加 MCP Server</h3></div>
@@ -809,9 +869,13 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
           ? <>
               <label>启动命令<input value={mcpForm.command} onChange={(event) => setMcpForm({ ...mcpForm, command: event.target.value })} placeholder="例如：npx" /></label>
               <label>参数（逗号分隔）<input value={mcpForm.args} onChange={(event) => setMcpForm({ ...mcpForm, args: event.target.value })} placeholder="-y, @modelcontextprotocol/server-filesystem, /tmp" /></label>
+              <label>工作目录（可选）<input value={mcpForm.cwd} onChange={(event) => setMcpForm({ ...mcpForm, cwd: event.target.value })} placeholder="/path/to/server" /></label>
+              <label>允许传入的环境变量名（逗号分隔）<input value={mcpForm.env} onChange={(event) => setMcpForm({ ...mcpForm, env: event.target.value })} placeholder="DEEPSEEK_API_KEY" /></label>
             </>
           : <label>URL<input value={mcpForm.url} onChange={(event) => setMcpForm({ ...mcpForm, url: event.target.value })} placeholder="https://mcp.example.com/sse" /></label>}
         <label className="check-row"><input type="checkbox" checked={mcpForm.enabled} onChange={(event) => setMcpForm({ ...mcpForm, enabled: event.target.checked })} />启用</label>
+        <label className="check-row"><input type="checkbox" checked={mcpForm.approved} onChange={(event) => setMcpForm({ ...mcpForm, approved: event.target.checked })} />允许启动该进程并将工具暴露给 Agent</label>
+        <p className="settings-hint">MCP server 是本机进程，可能访问你的文件与网络。默认只保存配置；明确授权后才会启动。当前执行层完整支持 stdio，HTTP/SSE 仅保存配置。</p>
         {error && <div className="settings-error" role="alert">{error}</div>}
         <div className="form-actions"><button disabled={busy}>添加 MCP</button></div>
       </form>
@@ -823,13 +887,25 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
         <div key={ext.id} className="model-item plain">
           <div className="model-info">
             <strong>{ext.name || ext.id}</strong>
-            <small>{ext.contributes.join("、") || "无贡献类型"}{ext.entry ? ` · 入口 ${ext.entry}` : ""}</small>
+            <small>{ext.contributes.join("、") || "无贡献类型"}{ext.package_sha256 ? ` · SHA ${ext.package_sha256.slice(0, 12)}` : ""}</small>
           </div>
-          <span className={`badge ${ext.enabled ? "badge-on" : "badge-off"}`}>{ext.runtime}{ext.enabled ? " · 启用" : " · 停用"}</span>
+          <button type="button" className="btn-ghost" disabled={busy} onClick={() => toggleExtension(ext)}>{ext.enabled ? "停用" : "启用"}</button>
           <button type="button" className="btn-danger" onClick={() => setConfirmDelete({ kind: "extension", id: ext.id, message: `删除扩展「${ext.id}」？` })}>删除</button>
         </div>)}</div> : <p className="muted">尚未添加扩展，可在下方添加。</p>}
+      <form className="settings-form" onSubmit={importExtension}>
+        <div className="settings-head"><h3>导入扩展包</h3></div>
+        <div className="path-field"><span>扩展根目录或 ZIP</span><div className="path-row">
+          <input aria-label="扩展根目录或 ZIP" value={importPath} onChange={(event) => setImportPath(event.target.value)} placeholder="选择含 zagent.extension.json 的目录或 ZIP" required />
+          {window.zagent.selectExtension && <button type="button" className="btn-ghost" onClick={async () => {
+            const selected = await window.zagent.selectExtension!();
+            if (selected) setImportPath(selected);
+          }}>选择…</button>}
+        </div></div>
+        <label className="check-row"><input type="checkbox" checked={importEnabled} onChange={(event) => setImportEnabled(event.target.checked)} />导入后启用 manifest（可执行扩展仍不会在主进程直接运行）</label>
+        <div className="form-actions"><button disabled={busy || !importPath}>安全导入</button></div>
+      </form>
       <form className="settings-form" onSubmit={addExtension}>
-        <div className="settings-head"><h3>添加扩展</h3></div>
+        <div className="settings-head"><h3>创建开发用 manifest</h3></div>
         <label>扩展 ID<input value={extForm.id} onChange={(event) => setExtForm({ ...extForm, id: event.target.value })} placeholder="com.example.my-tool（小写字母/数字/./_/-）" /></label>
         <label>名称<input value={extForm.name} onChange={(event) => setExtForm({ ...extForm, name: event.target.value })} placeholder="可留空，默认使用 ID" /></label>
         <label>运行方式<select value={extForm.runtime} onChange={(event) => setExtForm({ ...extForm, runtime: event.target.value })}>{EXTENSION_RUNTIMES.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>

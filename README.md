@@ -1,6 +1,6 @@
 # Z-Agent
 
-Z-Agent 是一个中文优先、可审计的本地长程智能体。v1 自行实现模型/工具循环、无损 EventLog、中文检索、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
+Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.0` 正在开发 v2：核心自行实现模型/工具循环、无损 EventLog、中文检索、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
 
 ## v1 能力
 
@@ -10,7 +10,8 @@ Z-Agent 是一个中文优先、可审计的本地长程智能体。v1 自行实
 - OpenAI-compatible 模型网关，可配置 Qwen、DeepSeek、GLM、Kimi、MiniMax 等国产模型；
 - 自研 tool-calling 循环、参数校验、最大轮次、任务超时和错误事件；
 - Electron + React 中文桌面 GUI，包含任务时间线和上下文检查器；
-- Z-Agent extension manifest 与 MCP server 配置发现；扩展代码默认不执行；
+- Z-Agent extension 目录/ZIP 安全导入、包哈希、启停与重启恢复；Node/Python 扩展代码仍默认不执行；
+- 受管 MCP stdio：显式授权、协议握手、工具发现/调用、进程关闭和原生 Agent tool-calling 接入；HTTP/SSE 暂只保存配置；
 - 单元、集成、API 功能和前端组件测试；真实 DeepSeek 长程任务验收脚本。
 
 ## 环境
@@ -59,7 +60,7 @@ npm run typecheck -w @zagent/ui
 npm run build:ui
 ```
 
-所有 Python 测试使用临时 SQLite 和 FakeProvider，不调用真实模型或互联网。
+测试不调用互联网；MCP 集成测试会启动真实本地 stdio 子进程并完成 JSON-RPC 握手、工具发现、调用和重启恢复，不以 mock 代替 transport。
 
 ## 项目结构
 
@@ -70,7 +71,7 @@ src/zagent/
   context/      中文检索、WorkingSet、上下文工具
   providers/    模型 HTTP 协议和响应归一
   agent/        自研工具循环和终止条件
-  extensions/   扩展清单与 MCP 配置
+  extensions/   扩展安全安装、清单与 MCP transport
   api/          FastAPI 传输层
 apps/
   desktop/      Electron 主进程和安全 IPC
@@ -87,5 +88,6 @@ tests/
 
 - Core API v1 只允许 loopback 地址；Renderer 不持有 Core token，所有请求经 Electron 主进程代理。
 - 模型只能提出工具调用，本地 ToolExecutor 决定是否执行。
-- 扩展和 MCP 来源默认不可信；v1 仅发现配置，不自动执行扩展代码。
+- 扩展和 MCP 来源默认不可信；扩展导入默认停用，可执行扩展不会加载到主进程。MCP 必须同时“启用 + 明确授权”才可启动并暴露给 Agent。
+- MCP stdio 使用参数数组直接启动、从不经过 shell；只传基础环境变量与用户点名的环境变量。当前仍不是完整 OS 沙箱，高影响工具的逐次授权属于后续 Permission Broker。
 - v1 API Key 以权限 `0600` 的本地文件保存；生产版将替换为系统 Keychain/Credential Manager。

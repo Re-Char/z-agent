@@ -11,6 +11,7 @@ interface ZAgentBridge {
   requestStream?<T>(path: string, options?: { method?: string; body?: unknown }, onEvent?: (event: StreamEvent) => void): Promise<{ result?: T; message?: string; type?: string; checkpoint?: { checkpoint_id: string; reason: string; state: Record<string, unknown> } }>;
   cancelStream?(): Promise<{ cancelled: boolean }>;
   selectFolder?(): Promise<string | null>;
+  selectExtension?(): Promise<string | null>;
   platform: string;
 }
 

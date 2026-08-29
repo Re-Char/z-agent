@@ -270,6 +270,11 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .model-list { display: grid; gap: 7px; max-height: 220px; overflow: auto; }
 .model-item { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto auto; align-items: center; gap: 9px; padding: 9px; border: 1px solid #26313e; border-radius: 9px; background: #101620; }
 .model-item.plain { grid-template-columns: minmax(0, 1fr) auto auto; }
+.integration-card { display: grid; gap: 8px; padding: 9px; border: 1px solid #26313e; border-radius: 9px; background: #101620; }
+.integration-row { display: flex; align-items: center; gap: 8px; }
+.integration-row .model-info { flex: 1; }
+.integration-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding-top: 7px; border-top: 1px solid #26313e; color: #7e8a9b; font-size: 9px; }
+.integration-tools code { padding: 3px 6px; border: 1px solid #2f4650; border-radius: 6px; background: #0c151c; color: #79cfad; }
 .model-item.active { border-color: #32604e; background: #11221c; }
 .model-activate { width: 20px; height: 20px; display: grid; place-items: center; padding: 0; border: 1px solid #3a4656; border-radius: 50%; background: transparent; color: var(--accent); font-size: 11px; }
 .model-info { min-width: 0; display: grid; gap: 2px; }
@@ -299,4 +304,5 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
   .topbar-title small { max-width: 230px; }
   .model-pill, .model-switcher { display: none; }
   .event.user { max-width: 84%; margin-left: 0; }
+  .integration-row { align-items: stretch; flex-direction: column; }
 }

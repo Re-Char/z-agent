@@ -4,13 +4,14 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from zagent.agent.fs_tools import FileSystemToolExecutor
+from zagent.agent.mcp_tools import MCPToolExecutor
 from zagent.agent.runtime import AgentRuntime, AgentRuntimeLimits
 from zagent.agent.tools import CombinedToolExecutor, ContextToolExecutor
 from zagent.config import AppSettings
 from zagent.context.orchestrator import ContextOrchestrator
 from zagent.context.working_set import WorkingSetBuilder
 from zagent.domain.errors import NotFoundError
-from zagent.extensions import ExtensionRegistry, MCPConfigRegistry
+from zagent.extensions import ExtensionRegistry, MCPConfigRegistry, MCPManager
 from zagent.providers import EchoProvider, OpenAICompatibleProvider
 from zagent.providers.base import ModelProvider
 from zagent.security import SecretStore
@@ -26,7 +27,7 @@ class ApplicationContainer:
         self.store = SqliteStore(self.settings.data_dir, self.settings.blob_threshold)
         self.secrets = SecretStore(self.settings.data_dir)
         self.extensions = ExtensionRegistry(self.settings.data_dir, self.project_dir)
-        self.mcp = MCPConfigRegistry(self.settings.data_dir)
+        self.mcp = MCPManager(MCPConfigRegistry(self.settings.data_dir))
         self._provider: Optional[ModelProvider] = None
         self._build_runtime()
 
@@ -44,6 +45,7 @@ class ApplicationContainer:
         tools = CombinedToolExecutor(
             ContextToolExecutor(self.context),
             FileSystemToolExecutor(self._workspace_path_for),
+            MCPToolExecutor(self.mcp),
         )
         self.agent = AgentRuntime(
             self.store,
@@ -129,4 +131,5 @@ class ApplicationContainer:
 
     def close(self) -> None:
         self._close_provider()
+        self.mcp.close()
         self.store.close()

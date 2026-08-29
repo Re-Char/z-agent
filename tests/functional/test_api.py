@@ -1,8 +1,15 @@
+import json
+import sys
+import zipfile
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from zagent.api import create_api
 from zagent.bootstrap import ApplicationContainer
 from zagent.domain.errors import AgentLimitError
+
+MCP_ECHO_SERVER = Path(__file__).parents[1] / "fixtures" / "mcp_echo_server.py"
 
 
 def test_api_session_message_and_context_flow(tmp_path):
@@ -176,6 +183,83 @@ def test_api_extension_and_mcp_management(tmp_path):
             assert client.delete("/v1/mcp/servers/missing", headers=headers).status_code == 404
     finally:
         container.close()
+
+
+def test_api_real_extension_import_and_mcp_tool_call(tmp_path):
+    archive_path = tmp_path / "real-extension.zip"
+    with zipfile.ZipFile(archive_path, "w") as archive:
+        archive.writestr(
+            "zagent.extension.json",
+            json.dumps(
+                {
+                    "id": "com.example.api-import",
+                    "name": "API Imported",
+                    "version": "2.0.0",
+                    "runtime": "declarative",
+                    "contributes": ["skills"],
+                }
+            ),
+        )
+        archive.writestr("skill.md", "# Imported through the real API")
+
+    data_dir = tmp_path / "data"
+    container = ApplicationContainer(str(data_dir), str(tmp_path))
+    try:
+        with TestClient(create_api(container, auth_token="test-token")) as client:
+            headers = {"Authorization": "Bearer test-token"}
+            imported = client.post(
+                "/v1/extensions/import",
+                headers=headers,
+                json={"source_path": str(archive_path)},
+            )
+            assert imported.status_code == 201
+            extension = imported.json()["extension"]
+            assert extension["status"] == "installed"
+            assert extension["enabled"] is False
+            assert len(extension["package_sha256"]) == 64
+            enabled = client.patch(
+                "/v1/extensions/com.example.api-import",
+                headers=headers,
+                json={"enabled": True},
+            )
+            assert enabled.json()["extension"]["enabled"] is True
+
+            configured = client.post(
+                "/v1/mcp/servers",
+                headers=headers,
+                json={
+                    "name": "api-echo",
+                    "transport": "stdio",
+                    "command": sys.executable,
+                    "args": [str(MCP_ECHO_SERVER)],
+                    "approved": True,
+                },
+            )
+            assert configured.status_code == 201
+            connected = client.post("/v1/mcp/servers/api-echo/connect", headers=headers)
+            assert connected.status_code == 200
+            assert connected.json()["protocol_version"] == "2025-11-25"
+            tools = client.get("/v1/mcp/servers/api-echo/tools", headers=headers)
+            assert tools.json()["tools"][0]["name"] == "echo"
+            called = client.post(
+                "/v1/mcp/servers/api-echo/tools/echo/call",
+                headers=headers,
+                json={"arguments": {"text": "端到端成功"}},
+            )
+            assert called.json()["result"]["structuredContent"]["echo"] == "端到端成功"
+            assert client.post(
+                "/v1/mcp/servers/api-echo/disconnect", headers=headers
+            ).json() == {"disconnected": True}
+    finally:
+        container.close()
+
+    # Both registries recover their imported state from disk after a core restart.
+    restarted = ApplicationContainer(str(data_dir), str(tmp_path))
+    try:
+        assert restarted.extensions.discover()[0].enabled is True
+        assert restarted.mcp.list_servers()[0]["approved"] is True
+    finally:
+        restarted.close()
 
 
 def test_api_workspace_flow(tmp_path):

@@ -223,6 +223,20 @@ ipcMain.handle("dialog:select-folder", async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("dialog:select-extension", async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择 Z-Agent 扩展目录或 ZIP 包",
+    properties: ["openFile", "openDirectory"],
+    filters: [
+      { name: "Z-Agent Extension", extensions: ["zip"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 app.whenReady().then(createWindow).catch((error) => {
   console.error(error);
   app.quit();

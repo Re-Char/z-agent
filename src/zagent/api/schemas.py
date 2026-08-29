@@ -64,14 +64,36 @@ class CreateExtensionRequest(StrictRequest):
         return self.model_dump()
 
 
+class ImportExtensionRequest(StrictRequest):
+    source_path: str = Field(min_length=1, max_length=2000)
+    enabled: bool = False
+    replace: bool = False
+
+
+class UpdateExtensionRequest(StrictRequest):
+    enabled: bool
+
+
 class AddMcpServerRequest(StrictRequest):
     name: str = Field(min_length=1, max_length=128)
     transport: str = Field(default="stdio", max_length=8)
     command: Optional[str] = Field(default=None, max_length=500)
     args: List[str] = Field(default_factory=list)
+    cwd: Optional[str] = Field(default=None, max_length=1000)
+    env: List[str] = Field(default_factory=list)
+    timeout_seconds: float = Field(default=15.0, ge=0.1, le=300)
     url: Optional[str] = Field(default=None, max_length=1000)
     enabled: bool = True
+    approved: bool = False
 
     def spec(self) -> Dict[str, Any]:
         return self.model_dump()
 
+
+class UpdateMcpServerRequest(StrictRequest):
+    enabled: Optional[bool] = None
+    approved: Optional[bool] = None
+
+
+class CallMcpToolRequest(StrictRequest):
+    arguments: Dict[str, Any] = Field(default_factory=dict)

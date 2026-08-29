@@ -10,7 +10,11 @@
 - ✅ GUI 能在重启后显示未解决 checkpoint，提供“继续任务”；成功续跑后记录 resolution event 并停止注入旧 checkpoint。
 - ✅ 工具 invocation 以 `(session_id, call_id)` 持久化，工具名与规范化参数 SHA-256 参与判定；已完成的调用只回放原结果，参数冲突或“副作用后、结果落库前”崩溃状态会阻断自动重试。
 - ✅ 确定性故障注入已在同一 session 连续产生 3 个 checkpoint 并最终完成；新 checkpoint 会以自己的 event ID supersede 旧暂停点，不会在完成后重新浮现。
+- ✅ 扩展目录/ZIP 已实现安全导入：暂存校验、路径穿越/符号链接/压缩包限额防护、包 SHA-256、安装时间、原子替换回滚、启停与 Core 重启恢复；Electron 提供原生选择器。
+- ✅ MCP stdio 已实现无 SDK 的 JSON-RPC 客户端：`2025-11-25` 初始化协商、换行帧限制、超时/取消、stderr 限额、工具分页发现/调用、按需启动和分级关闭；真实子进程及 Core HTTP 重启链路均通过。
+- ✅ 明确批准的 MCP 工具会转换为命名空间化原生工具 schema，进入现有 Agent loop、call ID 幂等保护和 EventLog 工具结果；未批准配置不会执行。
 - ⏳ 尚未完成：受控 Runner、真实 provider 下的 3 次 checkpoint 长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。因此 P0 总验收仍未标记完成。
+- ⏳ 扩展/MCP 仍未完成：独立 Extension Host、逐次 Permission Broker、MCP Streamable HTTP/OAuth、registry/Open VSX adapter、SBOM/签名与 OS 级沙箱仍属于后续切片。
 
 ## 1. P0：长任务可靠性与证据化验收
 
@@ -73,6 +77,8 @@
 - 增加 symlink race、TOCTOU、超大输出、压缩炸弹、Git 对象和嵌套依赖目录安全测试。
 
 ## 6. P1：扩展 Host 与 Marketplace
+
+**当前进度：** 本地目录/ZIP 安装与受管 MCP stdio 已完成首个可运行切片；这不等于完整 Extension Host 或 Marketplace 已完成。
 
 - 完成 Z-Agent Extension SDK、manifest、权限声明、独立 Worker/子进程 host、崩溃隔离和项目 lockfile。
 - 实现 MCP stdio/HTTP transport、官方/自定义 registry adapter、工具权限审查、OAuth/secret 隔离与调用审计。

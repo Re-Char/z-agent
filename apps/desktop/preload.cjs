@@ -35,5 +35,6 @@ contextBridge.exposeInMainWorld("zagent", {
   cancelStream: () => ipcRenderer.invoke("core:stream-cancel"),
   // Native directory picker (Electron only); null when cancelled/unavailable.
   selectFolder: () => ipcRenderer.invoke("dialog:select-folder"),
+  selectExtension: () => ipcRenderer.invoke("dialog:select-extension"),
   platform: process.platform
 });

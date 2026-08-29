@@ -14,11 +14,15 @@ from zagent.domain.errors import AgentLimitError, NotFoundError, ValidationError
 
 from .schemas import (
     AddMcpServerRequest,
+    CallMcpToolRequest,
     CreateExtensionRequest,
     CreateSessionRequest,
     CreateWorkspaceRequest,
     ExecuteContextToolRequest,
+    ImportExtensionRequest,
     SendMessageRequest,
+    UpdateExtensionRequest,
+    UpdateMcpServerRequest,
     UpdateModelRequest,
     UpdateWorkspaceRequest,
 )
@@ -169,6 +173,19 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     def create_extension(body: CreateExtensionRequest, core: CoreDependency) -> dict:
         return {"extension": core.extensions.create_extension(body.spec()).to_dict()}
 
+    @app.post("/v1/extensions/import", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def import_extension(body: ImportExtensionRequest, core: CoreDependency) -> dict:
+        extension = core.extensions.import_extension(
+            body.source_path, enabled=body.enabled, replace=body.replace
+        )
+        return {"extension": extension.to_dict()}
+
+    @app.patch("/v1/extensions/{extension_id}", dependencies=protected)
+    def update_extension(
+        extension_id: str, body: UpdateExtensionRequest, core: CoreDependency
+    ) -> dict:
+        return {"extension": core.extensions.set_enabled(extension_id, body.enabled).to_dict()}
+
     @app.delete("/v1/extensions/{extension_id}", dependencies=protected)
     def remove_extension(extension_id: str, core: CoreDependency) -> dict:
         if not core.extensions.remove_extension(extension_id):
@@ -182,6 +199,30 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     @app.post("/v1/mcp/servers", status_code=status.HTTP_201_CREATED, dependencies=protected)
     def add_mcp_server(body: AddMcpServerRequest, core: CoreDependency) -> dict:
         return {"server": core.mcp.add_server(body.spec())}
+
+    @app.patch("/v1/mcp/servers/{name}", dependencies=protected)
+    def update_mcp_server(name: str, body: UpdateMcpServerRequest, core: CoreDependency) -> dict:
+        return {
+            "server": core.mcp.set_state(name, enabled=body.enabled, approved=body.approved)
+        }
+
+    @app.post("/v1/mcp/servers/{name}/connect", dependencies=protected)
+    def connect_mcp_server(name: str, core: CoreDependency) -> dict:
+        return core.mcp.connect(name)
+
+    @app.post("/v1/mcp/servers/{name}/disconnect", dependencies=protected)
+    def disconnect_mcp_server(name: str, core: CoreDependency) -> dict:
+        return {"disconnected": core.mcp.disconnect(name)}
+
+    @app.get("/v1/mcp/servers/{name}/tools", dependencies=protected)
+    def list_mcp_tools(name: str, core: CoreDependency) -> dict:
+        return {"tools": core.mcp.list_tools(name)}
+
+    @app.post("/v1/mcp/servers/{name}/tools/{tool_name}/call", dependencies=protected)
+    def call_mcp_tool(
+        name: str, tool_name: str, body: CallMcpToolRequest, core: CoreDependency
+    ) -> dict:
+        return {"result": core.mcp.call_tool(name, tool_name, body.arguments)}
 
     @app.delete("/v1/mcp/servers/{name}", dependencies=protected)
     def remove_mcp_server(name: str, core: CoreDependency) -> dict:
