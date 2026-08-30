@@ -10,6 +10,7 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from zagent.agent.runtime import AgentRuntimeLimits  # noqa: E402
 from zagent.bootstrap import ApplicationContainer  # noqa: E402
 from zagent.domain.errors import AgentLimitError  # noqa: E402
 
@@ -52,11 +53,24 @@ FINALIZE_PROMPT = """完成 TASKBOARD_ACCEPTANCE_V1 最终审计：读取项目�
 不得虚构测试执行结果。"""
 
 
+CHECKPOINT_CHAIN_PROMPT = """CHECKPOINT_CHAIN_ACCEPTANCE_V1：这是 checkpoint 恢复故障注入验收。
+必须严格顺序执行，不能批量、跳步或只口头描述：
+1. 调用 fs_project_overview；
+2. 创建 checkpoint-ledger.txt，内容恰好为 step=0 加换行；
+3. 重新 fs_read 该文件取得最新 sha256；
+4. 用 fs_replace 和该 expected_sha256 把 step=0 改为 step=1；
+5. 再次 fs_read 取得新 sha256；
+6. 用 fs_replace 和新 expected_sha256 把 step=1 改为 step=2；
+7. 最后 fs_read，确认内容恰好为 step=2，再总结实际证据。
+每一步必须等待前一步工具结果。不要归档，不要创建其他文件。"""
+
+
 PHASES = {
     "build": BUILD_PROMPT,
     "audit": AUDIT_PROMPT,
     "extend": EXTEND_PROMPT,
     "finalize": FINALIZE_PROMPT,
+    "checkpoint_chain": CHECKPOINT_CHAIN_PROMPT,
 }
 
 
@@ -98,6 +112,12 @@ def main() -> None:
         default=0,
         help="automatically resume at most N saved checkpoints (default: 0)",
     )
+    parser.add_argument(
+        "--max-tool-rounds",
+        type=int,
+        choices=range(1, 9),
+        help="acceptance-only per-turn tool limit for deterministic checkpoint injection",
+    )
     args = parser.parse_args()
 
     if args.max_continuations < 0:
@@ -107,7 +127,14 @@ def main() -> None:
     if not workspace.is_dir():
         raise SystemExit(f"workspace must be an existing directory: {workspace}")
 
-    container = ApplicationContainer(args.data_dir, str(workspace))
+    runtime_limits = (
+        AgentRuntimeLimits(max_tool_rounds=args.max_tool_rounds, task_timeout_seconds=300)
+        if args.max_tool_rounds is not None
+        else None
+    )
+    container = ApplicationContainer(
+        args.data_dir, str(workspace), runtime_limits=runtime_limits
+    )
     try:
         model = container.settings.active_model
         if model.provider == "echo":

@@ -27,6 +27,7 @@ def test_api_session_message_and_context_flow(tmp_path):
             assert "本地演示模式" in message.json()["event"]["payload"]
             context = client.get(f"/v1/sessions/{session_id}/context", headers=headers)
             assert context.status_code == 200
+            assert context.json()["context_version"] == container.store.context_version(session_id)
             assert context.json()["stats"]["count"] >= 3
             assert context.json()["working_set"]["tokens"] > 0
             assert context.json()["archive_stats"] == {"count": 0, "tokens": 0}
@@ -40,6 +41,33 @@ def test_api_rejects_missing_auth(tmp_path):
         with TestClient(create_api(container, auth_token="secret")) as client:
             assert client.get("/v1/sessions").status_code == 401
             assert client.get("/health").status_code == 200
+    finally:
+        container.close()
+
+
+def test_api_rejects_a_stale_context_revision(tmp_path):
+    container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
+    try:
+        session_id = container.store.create_session("并发会话")["session_id"]
+        with TestClient(create_api(container, auth_token="test-token")) as client:
+            headers = {"Authorization": "Bearer test-token"}
+            first = client.post(
+                f"/v1/sessions/{session_id}/messages",
+                headers=headers,
+                json={"content": "第一条", "expected_context_version": 0},
+            )
+            assert first.status_code == 200
+            stale = client.post(
+                f"/v1/sessions/{session_id}/messages",
+                headers=headers,
+                json={"content": "过期写入", "expected_context_version": 0},
+            )
+            assert stale.status_code == 409
+            assert "expected=0" in stale.json()["error"]
+            assert all(
+                event.payload != "过期写入"
+                for event in container.store.list_events(session_id)
+            )
     finally:
         container.close()
 

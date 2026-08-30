@@ -1,5 +1,7 @@
 appId: com.zagent.desktop
 productName: Z-Agent
+artifactName: ${productName}-${version}-${arch}.${ext}
+afterSign: build/notarize.cjs
 directories:
   output: ../../dist/desktop
 files:
@@ -9,15 +11,22 @@ files:
   - from: ../ui/dist
     to: ui
 extraResources:
-  - from: ../../src
-    to: core/src
-  - from: ../../pyproject.toml
-    to: core/pyproject.toml
+  - from: ../../dist/core-runtime
+    to: core-runtime
 mac:
   category: public.app-category.developer-tools
   target: dmg
+  icon: build/icon-1024.png
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  gatekeeperAssess: false
 win:
   target: nsis
 linux:
   target: AppImage
-
+publish:
+  provider: github
+  owner: Re-Char
+  repo: z-agent
+  releaseType: release

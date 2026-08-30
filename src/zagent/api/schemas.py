@@ -26,6 +26,7 @@ class UpdateWorkspaceRequest(StrictRequest):
 
 class SendMessageRequest(StrictRequest):
     content: str = Field(min_length=1, max_length=200_000)
+    expected_context_version: Optional[int] = Field(default=None, ge=0)
 
 
 class ExecuteContextToolRequest(StrictRequest):

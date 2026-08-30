@@ -29,6 +29,18 @@ describe("Z-Agent desktop UI", () => {
     expect(screen.getByText("上下文检查器")).toBeInTheDocument();
   });
 
+  it("shows Core recovery and offline status reported by Electron", async () => {
+    let reportStatus: ((status: { status: "online" | "recovering" | "offline"; attempt?: number }) => void) | undefined;
+    window.zagent.onCoreStatus = vi.fn((callback) => { reportStatus = callback; });
+
+    render(<App />);
+    await waitFor(() => expect(window.zagent.onCoreStatus).toHaveBeenCalledOnce());
+    reportStatus?.({ status: "recovering", attempt: 1 });
+    expect(await screen.findByText("核心恢复中")).toBeInTheDocument();
+    reportStatus?.({ status: "offline" });
+    expect(await screen.findByText("核心离线")).toBeInTheDocument();
+  });
+
   it("opens a clean landing page after creating a workspace from an active conversation", async () => {
     let created = false;
     window.zagent.request = vi.fn(async (path: string, options) => {
@@ -171,6 +183,7 @@ describe("Z-Agent desktop UI", () => {
         { event_id: "cp1", sequence: 2, timestamp: new Date().toISOString(), kind: "checkpoint", role: "system", token_estimate: 8, payload: checkpoint },
       ] : [] };
       if (path === "/v1/sessions/s1/context") return {
+        context_version: 4,
         stats: { count: checkpointActive ? 2 : 0, tokens: 0 },
         working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 },
         latest_checkpoint: checkpointActive ? checkpoint : null, pinned_tokens: 0,
@@ -194,6 +207,7 @@ describe("Z-Agent desktop UI", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     const resume = await screen.findByRole("button", { name: "继续任务" });
+    expect((vi.mocked(window.zagent.requestStream!).mock.calls[0][1]?.body as { expected_context_version: number }).expected_context_version).toBe(4);
     expect(screen.getByText(/进度已写入 1234567890ab/)).toBeInTheDocument();
     expect(screen.queryByText(/kind.*checkpoint/)).not.toBeInTheDocument();
     fireEvent.click(resume);

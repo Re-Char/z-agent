@@ -1,6 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const { spawn } = require("node:child_process");
-const { existsSync } = require("node:fs");
+const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
 
@@ -8,9 +9,13 @@ let mainWindow;
 let coreProcess;
 let coreInfo;
 let coreStartPromise;
+let coreRestartTimer;
+let coreRestartAttempts = 0;
+let isQuitting = false;
 const activeStreamControllers = new Map();
 
 const DEFAULT_CORE_START_TIMEOUT_MS = 120000;
+const MAX_CORE_RESTARTS = 3;
 
 function coreStartTimeoutMs() {
   const configured = Number(process.env.ZAGENT_CORE_START_TIMEOUT_MS);
@@ -20,27 +25,96 @@ function coreStartTimeoutMs() {
 }
 
 function coreRoot() {
-  return app.isPackaged ? path.join(process.resourcesPath, "core") : path.resolve(__dirname, "../..");
+  return app.isPackaged
+    ? path.join(process.resourcesPath, "core-runtime")
+    : path.resolve(__dirname, "../..");
+}
+
+function coreCommand() {
+  const root = coreRoot();
+  if (app.isPackaged) {
+    const executable = process.platform === "win32"
+      ? path.join(root, "python.exe")
+      : path.join(root, "bin", "python");
+    if (!existsSync(executable)) {
+      throw new Error(`内置 Core runtime 不完整：${executable}`);
+    }
+    return { root, executable };
+  }
+  const condaPython = process.platform === "win32"
+    ? path.join(root, ".conda", "envs", "zagent", "python.exe")
+    : path.join(root, ".conda", "envs", "zagent", "bin", "python");
+  const executable = process.env.ZAGENT_PYTHON
+    || (existsSync(condaPython) ? condaPython : (process.platform === "win32" ? "python" : "python3"));
+  return { root, executable };
+}
+
+function recordCoreCrash(reason) {
+  try {
+    const diagnostics = path.join(app.getPath("userData"), "diagnostics");
+    mkdirSync(diagnostics, { recursive: true, mode: 0o700 });
+    writeFileSync(path.join(diagnostics, "last-core-crash.json"), JSON.stringify({
+      timestamp: new Date().toISOString(),
+      reason: String(reason).slice(0, 2000),
+      restartAttempts: coreRestartAttempts
+    }, null, 2), { mode: 0o600 });
+  } catch (error) {
+    console.error("failed to record core crash", error);
+  }
+}
+
+function sendCoreStatus(payload) {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send("core:status", payload);
+  }
+}
+
+function scheduleCoreRestart(reason) {
+  if (isQuitting || coreRestartTimer) return;
+  if (coreRestartAttempts >= MAX_CORE_RESTARTS) {
+    sendCoreStatus({ status: "offline", reason: "核心服务连续恢复失败" });
+    return;
+  }
+  recordCoreCrash(reason);
+  const delay = 1000 * (2 ** coreRestartAttempts);
+  coreRestartAttempts += 1;
+  sendCoreStatus({ status: "recovering", attempt: coreRestartAttempts, delay });
+  coreRestartTimer = setTimeout(async () => {
+    coreRestartTimer = undefined;
+    try {
+      await startCore();
+      await waitForCore();
+      coreRestartAttempts = 0;
+      sendCoreStatus({ status: "online", recovered: true });
+    } catch (error) {
+      scheduleCoreRestart(error);
+    }
+  }, delay);
 }
 
 function startCore() {
   if (coreInfo) return Promise.resolve(coreInfo);
   if (coreStartPromise) return coreStartPromise;
   coreStartPromise = new Promise((resolve, reject) => {
-    const root = coreRoot();
-    const condaPython = process.platform === "win32"
-      ? path.join(root, ".conda", "envs", "zagent", "python.exe")
-      : path.join(root, ".conda", "envs", "zagent", "bin", "python");
-    const python = process.env.ZAGENT_PYTHON || (existsSync(condaPython) ? condaPython : (process.platform === "win32" ? "python" : "python3"));
+    let command;
+    try {
+      command = coreCommand();
+    } catch (error) {
+      coreStartPromise = undefined;
+      reject(error);
+      return;
+    }
+    const { root, executable } = command;
     const args = ["-m", "zagent.server", "--port", "0", "--data-dir", path.join(app.getPath("userData"), "core"),
       "--project-dir", process.cwd()];
-    coreProcess = spawn(python, args, {
+    const childEnvironment = {
+      ...process.env,
+      PYTHONPYCACHEPREFIX: path.join(app.getPath("temp"), "zagent-pycache")
+    };
+    if (!app.isPackaged) childEnvironment.PYTHONPATH = path.join(root, "src");
+    coreProcess = spawn(executable, args, {
       cwd: root,
-      env: {
-        ...process.env,
-        PYTHONPATH: path.join(root, "src"),
-        PYTHONPYCACHEPREFIX: path.join(app.getPath("temp"), "zagent-pycache")
-      },
+      env: childEnvironment,
       stdio: ["ignore", "pipe", "pipe"]
     });
     let settled = false;
@@ -74,12 +148,19 @@ function startCore() {
       fail(error);
     });
     coreProcess.once("exit", (code) => {
+      const wasReady = settled;
       if (!settled) fail(new Error(`核心服务退出：${code}`));
       coreInfo = undefined;
       coreProcess = undefined;
+      if (wasReady && !isQuitting) scheduleCoreRestart(`核心服务异常退出：${code}`);
     });
   });
   return coreStartPromise;
+}
+
+async function ensureCore() {
+  if (!coreInfo) await startCore();
+  await waitForCore();
 }
 
 async function waitForCore() {
@@ -96,8 +177,7 @@ async function waitForCore() {
 }
 
 async function createWindow() {
-  await startCore();
-  await waitForCore();
+  await ensureCore();
   mainWindow = new BrowserWindow({
     width: 1380,
     height: 900,
@@ -123,6 +203,32 @@ async function createWindow() {
   }
 }
 
+function setupAutoUpdates() {
+  if (!app.isPackaged) return;
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.logger = console;
+  autoUpdater.on("error", (error) => console.error("auto update failed", error));
+  autoUpdater.on("update-downloaded", async (info) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      buttons: ["重启并安装", "稍后"],
+      defaultId: 0,
+      cancelId: 1,
+      title: "Z-Agent 更新已就绪",
+      message: `版本 ${info.version} 已下载完成。`,
+      detail: "重启后将自动安装；选择稍后会在退出应用时安装。"
+    });
+    if (choice.response === 0) autoUpdater.quitAndInstall(false, true);
+  });
+  const check = () => autoUpdater.checkForUpdates().catch((error) => {
+    console.error("update check failed", error);
+  });
+  setTimeout(check, 10000);
+  setInterval(check, 6 * 60 * 60 * 1000);
+}
+
 function responseError(payload, statusCode) {
   if (typeof payload?.error === "string") return payload.error;
   if (typeof payload?.detail === "string") return payload.detail;
@@ -134,7 +240,7 @@ function responseError(payload, statusCode) {
 }
 
 ipcMain.handle("core:request", async (_event, request) => {
-  if (!coreInfo) throw new Error("核心服务不可用");
+  await ensureCore();
   const method = request.method || "GET";
   const response = await fetch(`http://${coreInfo.host}:${coreInfo.port}${request.path}`, {
     method,
@@ -146,8 +252,8 @@ ipcMain.handle("core:request", async (_event, request) => {
   return payload;
 });
 
-ipcMain.handle("core:oauth-info", () => {
-  if (!coreInfo) throw new Error("核心服务不可用");
+ipcMain.handle("core:oauth-info", async () => {
+  await ensureCore();
   return {
     redirectUri: `http://${coreInfo.host}:${coreInfo.port}/v1/mcp/oauth/callback/browser`
   };
@@ -163,7 +269,7 @@ ipcMain.handle("shell:open-external", async (_event, url) => {
 });
 
 ipcMain.handle("core:stream", async (event, request) => {
-  if (!coreInfo) throw new Error("核心服务不可用");
+  await ensureCore();
   const senderId = event.sender.id;
   activeStreamControllers.get(senderId)?.controller.abort();
   const controller = new AbortController();
@@ -253,7 +359,11 @@ ipcMain.handle("dialog:select-extension", async () => {
   return result.filePaths[0];
 });
 
-app.whenReady().then(createWindow).catch((error) => {
+app.whenReady().then(async () => {
+  await createWindow();
+  setupAutoUpdates();
+}).catch((error) => {
+  recordCoreCrash(error);
   console.error(error);
   app.quit();
 });
@@ -267,5 +377,7 @@ app.on("activate", () => {
 });
 
 app.on("before-quit", () => {
+  isQuitting = true;
+  if (coreRestartTimer) clearTimeout(coreRestartTimer);
   if (coreProcess && !coreProcess.killed) coreProcess.kill("SIGTERM");
 });

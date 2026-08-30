@@ -56,6 +56,29 @@ def test_working_set_recreates_native_tool_call_message(store, session_id, conte
     assert messages[-1]["tool_call_id"] == "call_1"
 
 
+def test_runner_result_injects_addressable_evidence_id(store, session_id, context):
+    store.append_event(session_id, "assistant_tool_calls", "assistant", {
+        "content": "",
+        "tool_calls": [{
+            "call_id": "runner_1",
+            "name": "runner_execute",
+            "arguments": {"profile": "python_unittest"},
+        }],
+    })
+    result = store.append_event(
+        session_id,
+        "tool_result",
+        "tool",
+        {"ok": True, "provenance": "controlled-runner"},
+        tool_name="runner_execute",
+        tool_call_id="runner_1",
+    )
+
+    message = context.build_working_set(session_id).messages[-1]
+    assert result.event_id in message["content"]
+    assert "evidence_event_id" in message["content"]
+
+
 def test_pinned_event_survives_small_recent_window(store, session_id):
     from zagent.context.orchestrator import ContextOrchestrator
     from zagent.context.working_set import WorkingSetBuilder
@@ -240,3 +263,28 @@ def test_pin_invalidates_working_set_cache(store, session_id, context):
     second = context.build_working_set(session_id)
     assert event.event_id in second.pinned_event_ids
     assert second is not first
+
+
+def test_cache_identity_includes_model_tool_schema_and_workspace(store):
+    from zagent.context.working_set import WorkingSetBuilder
+
+    workspace = store.create_workspace("缓存身份", "")
+    session_id = store.create_session("缓存身份", workspace["workspace_id"])["session_id"]
+    schema = {"version": "tools-v1"}
+    builder = WorkingSetBuilder(store)
+    builder.configure_cache_identity("model-v1", lambda: schema["version"])
+
+    first = builder.build(session_id)
+    assert builder.build(session_id) is first
+
+    schema["version"] = "tools-v2"
+    after_tools = builder.build(session_id)
+    assert after_tools is not first
+
+    builder.configure_cache_identity("model-v2", lambda: schema["version"])
+    after_model = builder.build(session_id)
+    assert after_model is not after_tools
+
+    store.update_workspace(workspace["workspace_id"], name="缓存身份 2")
+    after_workspace = builder.build(session_id)
+    assert after_workspace is not after_model

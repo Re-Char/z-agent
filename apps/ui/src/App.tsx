@@ -4,7 +4,7 @@ import { Markdown } from "./Markdown";
 type Session = { session_id: string; title: string; updated_at: string; event_count: number };
 type Event = { event_id: string; sequence: number; timestamp: string; kind: string; role: string; payload: unknown; token_estimate: number; tool_name?: string };
 type Checkpoint = { checkpoint_id: string; reason: string; state: { status?: string; objective?: string; completed?: unknown[]; pending?: unknown[]; failure_reason?: string } };
-type ContextStatus = { stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; latest_checkpoint?: Checkpoint | null; archive_stats?: { count: number; tokens: number }; warning?: string | null; pinned_tokens: number };
+type ContextStatus = { context_version?: number; stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; latest_checkpoint?: Checkpoint | null; archive_stats?: { count: number; tokens: number }; warning?: string | null; pinned_tokens: number };
 type ModelConfig = { id: string; name: string; provider: string; model: string; base_url: string; context_window: number; soft_limit_ratio: number; hard_limit_ratio: number };
 type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string };
 type TokenStats = { total_tokens: number; completion_tokens: number; cache_hit_tokens: number; cache_miss_tokens: number; cache_hit_rate: number; elapsed_seconds: number; tokens_per_second: number };
@@ -82,6 +82,7 @@ function App() {
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [coreStatus, setCoreStatus] = useState<"online" | "recovering" | "offline">("online");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [extensionsOpen, setExtensionsOpen] = useState(false);
   const [extensions, setExtensions] = useState<Extension[]>([]);
@@ -134,6 +135,9 @@ function App() {
   useEffect(() => {
     Promise.all([refreshWorkspaces(), api<AppConfig>("/v1/config").then(setConfig)]).catch((reason) => setError(friendlyError(reason)));
   }, [refreshWorkspaces]);
+  useEffect(() => {
+    window.zagent?.onCoreStatus?.((status) => setCoreStatus(status.status));
+  }, []);
   useEffect(() => {
     if (activeWorkspaceId) refreshSessions(activeWorkspaceId).catch((reason) => setError(friendlyError(reason)));
   }, [activeWorkspaceId, refreshSessions]);
@@ -205,6 +209,7 @@ function App() {
   async function submitMessage(content: string) {
     if (!content.trim() || busy) return;
     let sessionId = activeId;
+    let expectedContextVersion = sessionId ? context?.context_version : 0;
     setInput("");
     setBusy(true);
     cancelRequested.current = false;
@@ -216,6 +221,7 @@ function App() {
         workspaceLandingId.current = undefined;
         const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: content.slice(0, 24), workspace_id: activeWorkspaceId } });
         sessionId = session.session_id;
+        expectedContextVersion = 0;
         setActiveId(sessionId);
       }
       const targetSessionId = sessionId;
@@ -232,7 +238,10 @@ function App() {
         let reply = "";
         const outcome = await window.zagent.requestStream<{ stats: TokenStats }>(
           `/v1/sessions/${targetSessionId}/messages/stream`,
-          { method: "POST", body: { content } },
+          { method: "POST", body: {
+            content,
+            ...(expectedContextVersion === undefined ? {} : { expected_context_version: expectedContextVersion })
+          } },
           (streamEvent) => {
             if (streamEvent.type === "content") {
               reply += streamEvent.text || "";
@@ -250,7 +259,13 @@ function App() {
           setLastStats((outcome.result as { stats: TokenStats }).stats);
         }
       } else {
-        const result = await api<{ stats: TokenStats }>(`/v1/sessions/${targetSessionId}/messages`, { method: "POST", body: { content } });
+        const result = await api<{ stats: TokenStats }>(`/v1/sessions/${targetSessionId}/messages`, {
+          method: "POST",
+          body: {
+            content,
+            ...(expectedContextVersion === undefined ? {} : { expected_context_version: expectedContextVersion })
+          }
+        });
         setLastStats(result.stats);
       }
       await Promise.all([refreshActive(targetSessionId), refreshSessions(activeWorkspaceId)]);
@@ -381,7 +396,9 @@ function App() {
             : <span className="model-pill">{config?.model.provider} · {config?.model.model}</span>}
         </div>
         <div className="topbar-actions">
-          <span className="status-dot">核心在线</span>
+          <span className={`status-dot status-${coreStatus}`}>
+            {coreStatus === "online" ? "核心在线" : coreStatus === "recovering" ? "核心恢复中" : "核心离线"}
+          </span>
           {toolTraceCount > 0 && <button type="button" className="tool-trace-toggle"
             onClick={() => setShowToolTrace((visible) => !visible)} aria-pressed={showToolTrace}
             aria-label={showToolTrace ? "隐藏工具记录" : "显示工具记录"}>

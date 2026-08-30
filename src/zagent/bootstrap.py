@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from zagent.agent.extension_tools import ExtensionToolExecutor
 from zagent.agent.fs_tools import FileSystemToolExecutor
 from zagent.agent.mcp_tools import MCPToolExecutor
+from zagent.agent.runner_tools import ControlledRunnerExecutor
 from zagent.agent.runtime import AgentRuntime, AgentRuntimeLimits
 from zagent.agent.tools import CombinedToolExecutor, ContextToolExecutor
 from zagent.config import AppSettings
@@ -29,8 +32,14 @@ from zagent.storage import SqliteStore
 class ApplicationContainer:
     """Composition root. Business modules do not import the HTTP or desktop layers."""
 
-    def __init__(self, data_dir: Optional[str] = None, project_dir: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        data_dir: Optional[str] = None,
+        project_dir: Optional[str] = None,
+        runtime_limits: AgentRuntimeLimits | None = None,
+    ) -> None:
         self.project_dir = project_dir or str(Path.cwd())
+        self._runtime_limits = runtime_limits
         self.settings = AppSettings.load(data_dir)
         self.store = SqliteStore(self.settings.data_dir, self.settings.blob_threshold)
         self.secrets = SecretStore(self.settings.data_dir)
@@ -59,15 +68,22 @@ class ApplicationContainer:
         tools = CombinedToolExecutor(
             ContextToolExecutor(self.context),
             FileSystemToolExecutor(self._workspace_path_for),
+            ControlledRunnerExecutor(self._workspace_path_for, self.permissions),
             MCPToolExecutor(self.mcp, self.permissions),
             ExtensionToolExecutor(self.extensions, self.extension_hosts),
         )
+        model_version = hashlib.sha256(
+            json.dumps(
+                model.model_dump(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        working_sets.configure_cache_identity(model_version, lambda: tools.schema_version)
         self.agent = AgentRuntime(
             self.store,
             self.context,
             self._provider,
             tools,
-            AgentRuntimeLimits(
+            self._runtime_limits or AgentRuntimeLimits(
                 max_tool_rounds=self.settings.max_tool_rounds,
                 task_timeout_seconds=self.settings.task_timeout_seconds,
             ),

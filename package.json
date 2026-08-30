@@ -7,7 +7,8 @@
   "scripts": {
     "dev": "concurrently -k -n ui,desktop -c cyan,magenta \"npm run dev -w @zagent/ui\" \"wait-on http://127.0.0.1:5173 && npm run dev -w @zagent/desktop\"",
     "build:ui": "npm run build -w @zagent/ui",
-    "build": "npm run build:ui && npm run package -w @zagent/desktop",
+    "build:core": "bash scripts/build_core_runtime.sh",
+    "build": "npm run build:ui && npm run build:core && npm run package -w @zagent/desktop",
     "env:create": "conda env create --prefix .conda/envs/zagent --file environment.yml",
     "env:update": "conda env update --prefix .conda/envs/zagent --file environment.yml --prune",
     "test:core": "PYTHONPATH=src conda run --prefix .conda/envs/zagent pytest --cov=zagent --cov-report=term-missing",

@@ -2,7 +2,7 @@
 
 本文收纳 v1 验收后尚未完成的产品能力。所有项目继续遵守：零训练、自研 Agent loop、不依赖 Agent 框架、不使用厂商托管代码/文件工具。
 
-## 0. 实施快照（2026-08-29）
+## 0. 实施快照（2026-08-30）
 
 - ✅ `sessions.context_version` 已迁移到 SQLite，事件、pin、archive、checkpoint 和工作区路径更新在事务中递增；已通过旧库迁移、Core 重启和双 Store 实例可见性测试。
 - ✅ 同一 Core 内的 FastAPI 并发请求通过 Store `RLock` 串行化共享 SQLite connection，修复 Electron 首屏同时请求 events/context 时的 `sqlite3.InterfaceError`；已加 12 线程压测。
@@ -18,7 +18,10 @@
 - ✅ MCP Streamable HTTP 支持 JSON/SSE response、`Mcp-Session-Id`、`MCP-Protocol-Version`、Bearer token 和会话 DELETE；OAuth 支持 RFC 9728/8414/OIDC discovery、PKCE S256、resource audience、state、refresh 与 DCR。
 - ✅ 官方 MCP Registry v0.1 支持搜索、版本详情和 Streamable HTTP remote 导入；真实线上搜索与 remote 映射通过，导入保持未批准且不自动执行包安装脚本。
 - ✅ macOS `sandbox-exec` 与 Linux bubblewrap backend 已实现，文件/网络按 manifest/config 收敛；引擎缺失或宿主禁止嵌套时 fail closed。
-- ⏳ 尚未完成：受控 Runner、真实 provider 下的 3 次 checkpoint 长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。2026-08-30 已在同一真实 DeepSeek 代码任务中恢复 2 次 checkpoint 并完成 197 个事件的四阶段任务，但未达到连续 3 次和 Runner 证据要求，因此 P0 总验收仍未标记完成。
+- ✅ 受控 Runner 已完成固定 `python_unittest` / `python_pytest` / `npm_test` 模板、逐次 Permission Broker、去敏快照、无网络 OS 沙箱、超时/输出/文件数/总大小上限和可引用 evidence event ID；沙箱不可用时 fail closed。
+- ✅ WorkingSet 缓存键现包含 SQLite `context_version`、workspace 持久版本、模型配置 SHA-256 和工具 schema SHA-256。GUI 会将读到的 revision 作为消息写入前置条件，过期写入返回 HTTP 409；两个 SQLite Store 的 CAS 竞争测试通过。
+- ✅ 真实 `deepseek-v4-flash` 在同一 session 中连续产生 10 个 checkpoint，然后续跑完成七步文件任务；最终文件为 `step=2\n`、SHA-256 为 `6224b8afa119441ab0a65db5d0896414779338cfc3085f281deb3b992b942dd4`，并且无 active checkpoint。
+- ✅ macOS arm64 已生成可重定位 Core bundle；打包 Electron 仅使用 `Resources/core-runtime/bin/python`，真实启动和杀掉 Core 后恢复通过。正式图标、自动更新、崩溃诊断和签名/公证 CI 已配置；实际 Apple 签名与公证产物仍需仓库 secrets 中的开发者证书和 API Key。
 - ⏳ 扩展生态余项：Open VSX/VSIX adapter、发布者公钥/透明日志信任链、Windows AppContainer backend 与项目 lockfile。当前 Ed25519 签名是本机安装证明，不冒充第三方发布者签名。
 
 ## 1. P0：长任务可靠性与证据化验收
@@ -44,6 +47,8 @@
 - provider manifest 记录上下文窗口、tokenizer、工具/流式/reasoning 能力与版本；未经回归的模型不标记 `agent_ready`。
 
 **P0 验收：** 同一 session 在至少 3 次 checkpoint 后完成多阶段代码任务；故障注入不重复写文件；所有测试结论可追溯到 runner 事件。
+
+**当前边界：** checkpoint 数量与真实 provider 恢复已超过门槛；Runner 的快照、授权、沙箱与证据投影由自动化覆盖。还需在普通非嵌套 macOS 宿主上跑一次真实 `sandbox-exec` Runner 产物验收；当前 Codex 宿主禁止嵌套沙箱，因此只验证了拒绝执行而没有绕过。
 
 ## 2. P0：数据库级上下文版本与持久状态
 

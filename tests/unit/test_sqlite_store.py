@@ -4,7 +4,7 @@ from threading import Barrier
 
 import pytest
 
-from zagent.domain.errors import NotFoundError, ValidationError
+from zagent.domain.errors import ConcurrentUpdateError, NotFoundError, ValidationError
 
 
 def test_create_and_list_session(store):
@@ -116,6 +116,42 @@ def test_tool_invocation_claim_is_unique_across_store_instances(tmp_path):
         with ThreadPoolExecutor(max_workers=2) as pool:
             actions = sorted(pool.map(claim, [first, second]))
         assert actions == ["execute", "uncertain"]
+    finally:
+        first.close()
+        second.close()
+
+
+def test_cross_process_optimistic_event_write_allows_only_one_stale_revision(tmp_path):
+    from zagent.storage.sqlite_store import SqliteStore
+
+    data_dir = tmp_path / "data"
+    first = SqliteStore(str(data_dir))
+    second = SqliteStore(str(data_dir))
+    try:
+        session_id = first.create_session("跨进程 CAS")["session_id"]
+        expected = first.context_version(session_id)
+        barrier = Barrier(2)
+
+        def append(store, content):
+            barrier.wait()
+            try:
+                store.append_event(
+                    session_id,
+                    "message",
+                    "user",
+                    content,
+                    expected_context_version=expected,
+                )
+                return "written"
+            except ConcurrentUpdateError:
+                return "stale"
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            outcomes = sorted(pool.map(append, [first, second], ["一", "二"]))
+
+        assert outcomes == ["stale", "written"]
+        assert first.context_version(session_id) == expected + 1
+        assert len(first.list_events(session_id)) == 1
     finally:
         first.close()
         second.close()

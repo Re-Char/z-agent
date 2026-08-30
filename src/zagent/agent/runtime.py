@@ -89,9 +89,12 @@ class AgentRuntime:
 
     # --- public entry points -------------------------------------------------
 
-    def send(self, session_id: str, content: str) -> AgentResult:
+    def send(
+        self, session_id: str, content: str, expected_context_version: int | None = None
+    ) -> AgentResult:
         user_event = self._store.append_event(
-            session_id, "message", "user", content, provenance="user"
+            session_id, "message", "user", content, provenance="user",
+            expected_context_version=expected_context_version,
         )
         state = _RoundState()
         while True:
@@ -102,14 +105,17 @@ class AgentRuntime:
                 return self._finalize(session_id, user_event.event_id, response, state)
             self._run_tool_round(session_id, user_event.event_id, response, state)
 
-    def send_stream(self, session_id: str, content: str) -> Iterator[Dict[str, Any]]:
+    def send_stream(
+        self, session_id: str, content: str, expected_context_version: int | None = None
+    ) -> Iterator[Dict[str, Any]]:
         """Streamed send: yields UI events, then a final {"type": "done", "result": ...}.
 
         The user message is stored up front so it can be rendered immediately;
         content deltas of the final reply round are forwarded for progressive output.
         """
         user_event = self._store.append_event(
-            session_id, "message", "user", content, provenance="user"
+            session_id, "message", "user", content, provenance="user",
+            expected_context_version=expected_context_version,
         )
         state = _RoundState()
         while True:
@@ -248,6 +254,10 @@ class AgentRuntime:
                     evidence["path"] = result["path"]
                 if isinstance(result.get("sha256"), str):
                     evidence["sha256"] = result["sha256"]
+                if isinstance(result.get("snapshot_sha256"), str):
+                    evidence["snapshot_sha256"] = result["snapshot_sha256"]
+                if isinstance(result.get("profile"), str):
+                    evidence["runner_profile"] = result["profile"]
                 if result.get("error"):
                     evidence["error"] = str(result["error"])[:300]
             state.tool_evidence.append(evidence)

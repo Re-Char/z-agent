@@ -431,3 +431,30 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - GitHub `v0.2.0` prerelease 已包含 arm64 DMG、blockmap、源码归档和 `SHA256SUMS.txt`；一次性发布工作流随后从 main 删除。
 - DMG 校验/挂载与 Electron 可执行文件本身正常，但包内没有可重定位 Python runtime。干净依赖条件下实际启动选择 macOS 系统 Python 3.9，并因缺少 `uvicorn` 退出，Core 无法上线。
 - 因此 v0.2.0 只能作为开发验收 prerelease；生产桌面发布仍须完成 Python Core bundle、Apple Developer ID 签名与公证，不能把“DMG 构建成功”表述为“干净机器可运行”。
+
+## 21. 发布可运行性、Runner 和一致性验收（2026-08-30）
+
+### 21.1 可重定位 Core 与 Electron 恢复
+
+- `npm run build:core` 在独立临时 Conda 环境构建约 201 MB 的 `dist/core-runtime`；从最终路径直接导入 `cryptography/fastapi/httpx/pydantic/uvicorn/zagent` 成功。
+- `npm run build:ui` 和 electron-builder arm64 DMG 成功；产物约 192 MB，`hdiutil verify` 通过，同时生成 blockmap 与 `latest-mac.yml`。
+- 真实启动打包后的 `Z-Agent.app`，UI 显示 Core 在线；进程命令明确为 `Contents/Resources/core-runtime/bin/python -m zagent.server`，没有使用系统 Python。
+- 杀掉已就绪 Core PID 后，Electron 在退避窗口内拉起新 PID，仍使用包内 Python；UI 保持可用。
+- 本机无 Developer ID identity 且未配置公证凭据，所以本地 DMG 仅为未签名验收产物。持久 tag workflow 会在凭据缺失时失败，不会发布伪公证产物。现有 GitHub `v0.1.1` 没有 `latest-mac.yml`，因此新自动更新客户端的本次线上检查预期返回 404；下一个新工作流 Release 才会提供元数据。
+
+### 21.2 受控 Runner 与缓存/数据库并发
+
+- Runner 集成测试验证：批准模板在快照中执行，`.env` 不进快照；未授权请求被阻断；超时会杀掉进程组；输出保留在上限内并标记截断；OS 沙箱不可用时 fail closed；快照限额超标时拒绝。
+- `WorkingSetBuilder` 定向测试分别改变 model version、tool schema version 和 workspace version，均导致旧投影失效。Runner 工具结果投影自动带上真实 event ID。
+- 两个独立 `SqliteStore` 对同一 revision 发起 CAS，只有第一个写入成功，第二个抛出 `ConcurrentUpdateError`。HTTP 过期 revision 映射为 409，且过期用户消息未进入 EventLog。
+
+### 21.3 真实 DeepSeek checkpoint 长任务
+
+- 临时工作区 `/private/tmp/zagent-checkpoint-real.Hvd8ko`，模型 `deepseek-v4-flash`，session `ses_fa0d63ad4f924103aae8270835b3ee6d`。
+- 任务要求七个顺序操作：项目概览、写入 `step=0`、读 SHA、替换为 `step=1`、再读 SHA、替换为 `step=2`、最终读取。每次只允许一个工具轮，同一 session 连续产生 10 个 checkpoint 后完成。
+- 外部验证文件为 7 bytes，内容精确为 `step=2\n`，SHA-256 `6224b8afa119441ab0a65db5d0896414779338cfc3085f281deb3b992b942dd4`。SQLite 查询为 `10|0`（10 个 checkpoint、0 个 active），明显超过连续 3 次门槛。
+
+### 21.4 最终自动化门禁
+
+- Python：164 个测试通过，总覆盖率不低于 80%；Ruff 通过。
+- UI：13 个 Vitest 通过，包含 Markdown、Thinking 收起、工作区初始页、Core 恢复状态和 CAS revision 传递；TypeScript strict 通过。

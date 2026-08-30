@@ -172,6 +172,15 @@
 
 1. **运行实例需重启 Electron 才能加载新代码**（用户本地应用跑的是旧构建）
 2. 工作区必须设置路径后 agent 才能读文件（侧边栏 ✎ 编辑）
-3. `WorkingSetBuilder` 投影仍在进程内缓存，但失效版本已持久到 SQLite；模型/工具 schema 版本纳入缓存键仍属 v2 待办
+3. `WorkingSetBuilder` 投影仍保存在进程内，但缓存键已同时绑定 SQLite context/workspace revision、模型配置 SHA 和工具 schema SHA；GUI 使用 context revision 做乐观并发控制
 4. 测试基础设施（CDP 浏览器驱动、SSE 代理桥）是临时脚本，未入库；`tests/` 内的都是持久化测试
 5. `.conda/envs/zagent` 是本地 conda 环境；`estimate_tokens` 中文 1 字符 ≈ 1 token（口径已在工具描述注明）
+
+### 20. 自包含桌面发布、受控 Runner 与跨进程一致性
+
+- 新增独立 `environment-runtime.yml` 与 `scripts/build_core_runtime.sh`；构建脚本在临时 Conda 环境中安装运行时依赖和 Z-Agent，再用 `conda-pack` 生成可重定位 `dist/core-runtime`。
+- 生产 Electron 只启动包内 `Resources/core-runtime/bin/python`，runtime 缺失即拒绝启动；不再回退到目标机的 Conda/系统 Python。
+- 加入正式应用图标、hardened runtime/entitlements、`@electron/notarize`、`electron-updater`、Core 1/2/4 秒退避恢复与 `0600` 崩溃诊断。tag CI 强制 Apple 凭据，并验证 codesign/stapler/spctl/DMG 后上传更新元数据、SBOM、源码归档与校验和。
+- 新增 `runner_execute`：只允许三种固定测试模板，每次经 Permission Broker，仅在去敏快照内运行，禁止网络并限制超时、输出、文件数和总大小；结果携带 provenance、快照 SHA 和 event ID。
+- `WorkingSet` 缓存键加入模型配置与工具 schema 版本；workspace revision 独立持久。消息 API 支持 expected context revision，并发冲突返回 409，Electron GUI 已传递该 revision。
+- 真实 `deepseek-v4-flash` 同一 session 连续写入 10 个 checkpoint 后续跑完成，最终文件 SHA 由外部校验，数据库无 active checkpoint。

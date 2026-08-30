@@ -63,6 +63,7 @@ class ContextOrchestrator:
                     "近期对话事件可能被挤出。建议取消部分固定。"
                 )
             return {
+                "context_version": self._store.context_version(session_id),
                 "stats": self._store.session_stats(session_id),
                 "working_set": working_set_data,
                 "latest_archive": self._store.latest_archive(session_id),

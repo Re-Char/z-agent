@@ -13,6 +13,7 @@ interface ZAgentBridge {
   selectFolder?(): Promise<string | null>;
   selectExtension?(): Promise<string | null>;
   oauthInfo?(): Promise<{ redirectUri: string }>;
+  onCoreStatus?(callback: (status: { status: "online" | "recovering" | "offline"; attempt?: number }) => void): void;
   openExternal?(url: string): Promise<{ opened: boolean }>;
   platform: string;
 }

@@ -1,0 +1,107 @@
+name: Release signed desktop build
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+          activate-environment: ""
+          auto-activate-base: true
+
+      - name: Validate release version and Apple credentials
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        run: |
+          expected_tag="v$(node -p "require('./package.json').version")"
+          test "$GITHUB_REF_NAME" = "$expected_tag"
+          test -n "$CSC_LINK"
+          test -n "$CSC_KEY_PASSWORD"
+          test -n "$APPLE_API_KEY_P8"
+          test -n "$APPLE_API_KEY_ID"
+          test -n "$APPLE_API_ISSUER"
+          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Install build dependencies
+        run: |
+          npm ci
+          conda install --yes --name base --channel conda-forge conda-pack
+
+      - name: Build relocatable Core and UI
+        run: |
+          ZAGENT_CONDA_PACK="$(command -v conda-pack)" npm run build:core
+          npm run build:ui
+
+      - name: Sign, notarize and package DMG
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ runner.temp }}/AuthKey.p8
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          ZAGENT_REQUIRE_NOTARIZATION: "1"
+        run: npm run package -w @zagent/desktop -- --mac dmg --arm64 --publish never
+
+      - name: Verify signature, notarization and image
+        run: |
+          codesign --verify --deep --strict --verbose=2 dist/desktop/mac-arm64/Z-Agent.app
+          xcrun stapler validate dist/desktop/mac-arm64/Z-Agent.app
+          spctl --assess --type execute --verbose=4 dist/desktop/mac-arm64/Z-Agent.app
+          hdiutil verify dist/desktop/Z-Agent-*-arm64.dmg
+
+      - name: Create source archive, SBOM and checksums
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="z-agent-$GITHUB_REF_NAME/" \
+            --output="dist/desktop/Z-Agent-$version-source.tar.gz" "$GITHUB_SHA"
+          npm sbom --sbom-format cyclonedx \
+            > "dist/desktop/Z-Agent-$version-npm-sbom.cdx.json"
+          cd dist/desktop
+          shasum -a 256 \
+            Z-Agent-*-arm64.dmg \
+            Z-Agent-*-arm64.dmg.blockmap \
+            latest-mac.yml \
+            Z-Agent-*-source.tar.gz \
+            Z-Agent-*-npm-sbom.cdx.json \
+            > SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/desktop/Z-Agent-*-arm64.dmg \
+              dist/desktop/Z-Agent-*-arm64.dmg.blockmap dist/desktop/latest-mac.yml \
+              dist/desktop/Z-Agent-*-source.tar.gz \
+              dist/desktop/Z-Agent-*-npm-sbom.cdx.json \
+              dist/desktop/SHA256SUMS.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/desktop/Z-Agent-*-arm64.dmg \
+              dist/desktop/Z-Agent-*-arm64.dmg.blockmap dist/desktop/latest-mac.yml \
+              dist/desktop/Z-Agent-*-source.tar.gz \
+              dist/desktop/Z-Agent-*-npm-sbom.cdx.json \
+              dist/desktop/SHA256SUMS.txt --verify-tag --generate-notes
+          fi

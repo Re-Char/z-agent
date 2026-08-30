@@ -9,6 +9,7 @@ Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.
 - 中文字符 unigram/bigram + 技术标识符的确定性混合检索；若环境安装 Jieba 会自动增加词级召回；
 - OpenAI-compatible 模型网关，可配置 Qwen、DeepSeek、GLM、Kimi、MiniMax 等国产模型；
 - 自研 tool-calling 循环、参数校验、最大轮次、任务超时和错误事件；
+- 受控测试 Runner：固定 Python/Node 测试模板、逐次授权、项目快照、无网络 OS 沙箱、超时和输出上限；
 - Electron + React 中文桌面 GUI，包含任务时间线和上下文检查器；
 - Z-Agent extension 目录/ZIP 安全导入、独立 Node/Python Extension Host、逐次权限审批、CycloneDX SBOM、本机安装签名与沙箱后端；
 - 受管 MCP stdio 与 Streamable HTTP：显式授权、协议握手、工具发现/调用、OAuth PKCE、官方 Registry remote 导入和原生 Agent tool-calling 接入；
@@ -58,6 +59,7 @@ npm run test:core
 npm run test -w @zagent/ui
 npm run typecheck -w @zagent/ui
 npm run build:ui
+npm run build:core
 ```
 
 测试不调用互联网；MCP 集成测试会启动真实本地 stdio 子进程并完成 JSON-RPC 握手、工具发现、调用和重启恢复，不以 mock 代替 transport。
@@ -107,4 +109,10 @@ tests/
 
 ## 发布包状态
 
-`v0.2.0` DMG 是开发验收用 prerelease：已提供校验和，但尚未内置可重定位 Python Core runtime，也未做 Apple Developer ID 签名与公证。源码/Conda 开发模式可运行；当前 DMG 不保证在未安装 Python 依赖的干净 macOS 上启动。
+`v0.2.0` 已发布的 prerelease 仍是旧的开发验收包。当前源码已改为用 `conda-pack`
+构建可重定位 `core-runtime` 并内置到 DMG；打包后 Core 不会回退到系统 Python。本地 arm64
+DMG 已经过实际启动、Core 异常退出后重启与 `hdiutil verify`。
+
+持久的 tag 发布工作流要求 Apple Developer ID 与 App Store Connect API Key，会强制签名、
+公证、staple 验证，并上传 DMG、blockmap、`latest-mac.yml`、SBOM、源码归档和
+`SHA256SUMS.txt`。没有这些凭据时本地可生成未签名测试包，但不会冒充已公证发行包。

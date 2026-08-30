@@ -13,6 +13,10 @@ __pycache__/
 *.egg-info/
 .Python
 build/
+!apps/desktop/build/
+!apps/desktop/build/icon-1024.png
+!apps/desktop/build/entitlements.mac.plist
+!apps/desktop/build/notarize.cjs
 dist/
 .eggs/
 *.egg

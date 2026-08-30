@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Dict, Protocol
 
 from zagent.context.orchestrator import ContextOrchestrator
@@ -46,6 +48,13 @@ class CombinedToolExecutor:
                     seen.add(name)
                     self._by_name[name] = executor
         return merged
+
+    @property
+    def schema_version(self) -> str:
+        canonical = json.dumps(
+            self.schemas, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def execute(self, session_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         executor = self._by_name.get(name)

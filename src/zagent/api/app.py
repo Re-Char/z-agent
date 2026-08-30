@@ -12,6 +12,7 @@ from zagent import __version__
 from zagent.bootstrap import ApplicationContainer
 from zagent.domain.errors import (
     AgentLimitError,
+    ConcurrentUpdateError,
     NotFoundError,
     PermissionRequiredError,
     ValidationError,
@@ -73,7 +74,12 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
 
     @app.exception_handler(ZAgentError)
     async def handle_domain_error(_: Request, exc: ZAgentError) -> JSONResponse:
-        code = status.HTTP_404_NOT_FOUND if isinstance(exc, NotFoundError) else status.HTTP_400_BAD_REQUEST
+        if isinstance(exc, NotFoundError):
+            code = status.HTTP_404_NOT_FOUND
+        elif isinstance(exc, ConcurrentUpdateError):
+            code = status.HTTP_409_CONFLICT
+        else:
+            code = status.HTTP_400_BAD_REQUEST
         content = {"error": str(exc)}
         if isinstance(exc, AgentLimitError) and exc.checkpoint:
             content["checkpoint"] = exc.checkpoint
@@ -149,13 +155,22 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     def send_message(
         session_id: str, body: SendMessageRequest, core: CoreDependency
     ) -> dict:
-        return core.agent.send(session_id, body.content).to_dict()
+        if body.expected_context_version is None:
+            return core.agent.send(session_id, body.content).to_dict()
+        return core.agent.send(session_id, body.content, body.expected_context_version).to_dict()
 
     @app.post("/v1/sessions/{session_id}/messages/stream", dependencies=protected)
     def stream_message(session_id: str, body: SendMessageRequest, core: CoreDependency) -> StreamingResponse:
         def generate() -> AsyncIterator[str]:
             try:
-                for event in core.agent.send_stream(session_id, body.content):
+                stream = (
+                    core.agent.send_stream(session_id, body.content)
+                    if body.expected_context_version is None
+                    else core.agent.send_stream(
+                        session_id, body.content, body.expected_context_version
+                    )
+                )
+                for event in stream:
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             except Exception as exc:  # noqa: BLE001 - surface any failure as a streamed error
                 payload = {"type": "error", "message": str(exc)}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Tuple
 
 from zagent.domain.models import EventRecord, WorkingSet
 from zagent.storage.sqlite_store import SqliteStore
@@ -31,15 +31,29 @@ class WorkingSetBuilder:
         # exceed the provider's real context window.
         self._hard_cap = context_window
         self._recent_event_limit = recent_event_limit
-        # Per-session build cache keyed by the store's monotonic context version.
-        self._cache: Dict[str, Tuple[int, WorkingSet]] = {}
+        self._model_version = "unconfigured"
+        self._tool_schema_version: Callable[[], str] = lambda: "unconfigured"
+        # Cross-process-safe cache identity: conversation, workspace, model and tools.
+        self._cache: Dict[str, Tuple[tuple[int, int, str, str], WorkingSet]] = {}
 
     @property
     def budget(self) -> int:
         return self._budget
 
+    def configure_cache_identity(
+        self, model_version: str, tool_schema_version: Callable[[], str]
+    ) -> None:
+        self._model_version = model_version
+        self._tool_schema_version = tool_schema_version
+        self._cache.clear()
+
     def build(self, session_id: str) -> WorkingSet:
-        version = self._store.context_version(session_id)
+        version = (
+            self._store.context_version(session_id),
+            self._store.workspace_version(session_id),
+            self._model_version,
+            self._tool_schema_version(),
+        )
         cached = self._cache.get(session_id)
         if cached is not None and cached[0] == version:
             return cached[1]
@@ -155,9 +169,11 @@ class WorkingSetBuilder:
             prompt += (
                 f"\n\n当前工作区（文件安全边界）：{workspace_path}\n"
                 "你有 fs_list / fs_mkdir / fs_read / fs_search / fs_project_overview / "
-                "fs_write / fs_replace 工具，"
+                "fs_write / fs_replace 工具，以及需逐次授权的 runner_execute 测试工具。"
                 "只能访问该工作区目录。读取后应使用 fs_read 返回的 sha256 修改最新版本；"
                 "敏感文件、密钥、凭据、二进制文件、工作区外路径会被工具拒绝。"
+                "只有 runner_execute 返回 ok=true 时才能声称测试通过，并应引用其 "
+                "evidence_event_id；Runner 不接受任意命令或网络访问。"
             )
         else:
             prompt += (
@@ -193,7 +209,8 @@ class WorkingSetBuilder:
             completed.append({
                 key: item[key]
                 for key in (
-                    "call_id", "tool", "tool_result_event_id", "ok", "replayed", "path", "sha256"
+                    "call_id", "tool", "tool_result_event_id", "ok", "replayed", "path",
+                    "sha256", "snapshot_sha256", "runner_profile"
                 )
                 if key in item
             })
@@ -253,11 +270,14 @@ class WorkingSetBuilder:
             if event.payload.get("reasoning_content") is not None:
                 message["reasoning_content"] = event.payload["reasoning_content"]
             return message
-        content = (
-            event.payload
-            if isinstance(event.payload, str)
-            else json.dumps(event.payload, ensure_ascii=False)
-        )
+        payload = event.payload
+        if (
+            event.kind == "tool_result"
+            and event.tool_name == "runner_execute"
+            and isinstance(payload, dict)
+        ):
+            payload = {**payload, "evidence_event_id": event.event_id}
+        content = payload if isinstance(payload, str) else json.dumps(payload, ensure_ascii=False)
         message: Dict[str, Any] = {
             "role": event.role if event.role in {"user", "assistant", "tool", "system"} else "system",
             "content": content,

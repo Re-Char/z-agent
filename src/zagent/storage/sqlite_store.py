@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from zagent.context.tokenization import estimate_tokens, excerpt, searchable_text
-from zagent.domain.errors import NotFoundError, ValidationError
+from zagent.domain.errors import ConcurrentUpdateError, NotFoundError, ValidationError
 from zagent.domain.models import EventRecord
 
 from .blob_store import BlobStore
@@ -40,6 +40,7 @@ class SqliteStore:
         self._lock = threading.RLock()
         self._db = sqlite3.connect(str(root / "state.db"), check_same_thread=False)
         self._db.row_factory = sqlite3.Row
+        self._db.execute("PRAGMA busy_timeout=5000")
         self._db.execute("PRAGMA journal_mode=WAL")
         self._db.execute("PRAGMA foreign_keys=ON")
         with self._db:
@@ -75,8 +76,8 @@ class SqliteStore:
         now = self._now()
         with self._lock, self._db:
             self._db.execute(
-                "INSERT INTO workspaces(workspace_id,name,path,created_at) VALUES(?,?,?,?)",
-                (workspace_id, name.strip() or "未命名工作区", path.strip(), now),
+                "INSERT INTO workspaces(workspace_id,name,path,version,created_at) VALUES(?,?,?,?,?)",
+                (workspace_id, name.strip() or "未命名工作区", path.strip(), 0, now),
             )
         return self.get_workspace(workspace_id)
 
@@ -113,6 +114,11 @@ class SqliteStore:
                 ).fetchall()
                 for row in session_rows:
                     self._bump_context_version(row["session_id"])
+            if name is not None or path is not None:
+                self._db.execute(
+                    "UPDATE workspaces SET version=version+1 WHERE workspace_id=?",
+                    (workspace_id,),
+                )
         return self.get_workspace(workspace_id)
 
     @_serialized
@@ -186,14 +192,18 @@ class SqliteStore:
         tags: Optional[Sequence[str]] = None,
         sensitivity: str = "normal",
         provenance: str = "runtime",
+        expected_context_version: Optional[int] = None,
     ) -> EventRecord:
         with self._lock, self._db:
+            if expected_context_version is not None:
+                self._claim_context_version(session_id, expected_context_version)
             event = self._insert_event(
                 session_id, kind, role, payload,
                 parent_event_id=parent_event_id, tool_name=tool_name, tool_call_id=tool_call_id,
                 tags=tags, sensitivity=sensitivity, provenance=provenance,
             )
-            self._bump_context_version(session_id)
+            if expected_context_version is None:
+                self._bump_context_version(session_id)
         return event
 
     def _insert_event(
@@ -250,6 +260,26 @@ class SqliteStore:
         if cursor.rowcount != 1:
             raise NotFoundError("session not found")
 
+    def _claim_context_version(self, session_id: str, expected: int) -> None:
+        """Atomically reserve one revision for a cross-process optimistic write."""
+        cursor = self._db.execute(
+            """UPDATE sessions SET context_version=context_version+1
+               WHERE session_id=? AND context_version=?""",
+            (session_id, expected),
+        )
+        if cursor.rowcount == 1:
+            return
+        if self._db.execute(
+            "SELECT 1 FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone() is None:
+            raise NotFoundError("session not found")
+        current = self._db.execute(
+            "SELECT context_version FROM sessions WHERE session_id=?", (session_id,)
+        ).fetchone()[0]
+        raise ConcurrentUpdateError(
+            f"会话已被其他进程更新：expected={expected}, current={current}"
+        )
+
     @_serialized
     def context_version(self, session_id: str) -> int:
         """Return the database-backed working-set cache version for a session."""
@@ -260,6 +290,19 @@ class SqliteStore:
         if row is None:
             raise NotFoundError("session not found")
         return int(row["context_version"])
+
+    @_serialized
+    def workspace_version(self, session_id: str) -> int:
+        """Return the persisted workspace revision participating in prompt cache keys."""
+        row = self._db.execute(
+            """SELECT w.version FROM sessions s
+               LEFT JOIN workspaces w ON w.workspace_id=s.workspace_id
+               WHERE s.session_id=?""",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("session not found")
+        return int(row["version"] or 0)
 
     @_serialized
     def claim_tool_invocation(

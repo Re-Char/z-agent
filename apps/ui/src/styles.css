@@ -78,6 +78,10 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, select:focus-
 .topbar-actions { display: flex; align-items: center; gap: 10px; flex: none; -webkit-app-region: no-drag; }
 .status-dot { color: #77dcb4; font-size: 10px; }
 .status-dot::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 6px; border-radius: 50%; background: #61e3ac; box-shadow: 0 0 9px #61e3ac; }
+.status-recovering { color: #f1c56d; }
+.status-recovering::before { background: #f1c56d; box-shadow: 0 0 9px #f1c56d; }
+.status-offline { color: #ef7f89; }
+.status-offline::before { background: #ef7f89; box-shadow: 0 0 9px #ef7f89; }
 .inspector-toggle { display: none; padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; background: #151b25; color: #9da8b8; font-size: 11px; }
 .tool-trace-toggle { padding: 6px 9px; border: 1px solid #2b3746; border-radius: 8px; background: #121923; color: #8290a3; font-size: 10px; }
 .tool-trace-toggle:hover, .tool-trace-toggle[aria-pressed="true"] { border-color: #3b705b; color: #7bd8b2; background: #11221c; }

@@ -10,6 +10,10 @@ class ValidationError(ZAgentError):
     pass
 
 
+class ConcurrentUpdateError(ValidationError):
+    """The caller based a write on a stale database revision."""
+
+
 class ModelProtocolError(ZAgentError):
     pass
 

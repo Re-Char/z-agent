@@ -37,6 +37,7 @@ contextBridge.exposeInMainWorld("zagent", {
   selectFolder: () => ipcRenderer.invoke("dialog:select-folder"),
   selectExtension: () => ipcRenderer.invoke("dialog:select-extension"),
   oauthInfo: () => ipcRenderer.invoke("core:oauth-info"),
+  onCoreStatus: (callback) => ipcRenderer.on("core:status", (_event, payload) => callback(payload)),
   openExternal: (url) => ipcRenderer.invoke("shell:open-external", url),
   platform: process.platform
 });

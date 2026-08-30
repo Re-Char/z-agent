@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS workspaces (
     workspace_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     path TEXT NOT NULL DEFAULT '',
+    version INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sessions (
@@ -129,6 +130,7 @@ MIGRATIONS_SQL = [
     """ALTER TABLE sessions ADD COLUMN workspace_id TEXT REFERENCES workspaces(workspace_id)""",
     # Persist working-set cache invalidation across Core restarts and processes.
     """ALTER TABLE sessions ADD COLUMN context_version INTEGER NOT NULL DEFAULT 0""",
+    """ALTER TABLE workspaces ADD COLUMN version INTEGER NOT NULL DEFAULT 0""",
     """ALTER TABLE checkpoints ADD COLUMN resolved_at TEXT""",
     """ALTER TABLE checkpoints ADD COLUMN resolution_event_id TEXT REFERENCES events(event_id)""",
 ]

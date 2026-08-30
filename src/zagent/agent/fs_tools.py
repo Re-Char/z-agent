@@ -82,6 +82,7 @@ _IGNORED_DIRS = {
     ".git", ".hg", ".svn", "node_modules", ".conda", ".venv", "venv", "__pycache__",
     ".pytest_cache", ".ruff_cache", ".mypy_cache", "dist", "build", "target", ".next",
     ".turbo", "coverage", ".coverage", ".idea", ".vscode", ".DS_Store",
+    ".zagent-runner",
 }
 _IGNORED_FILES = {".DS_Store", "*.pyc", "*.pyo", "package-lock.json", "pnpm-lock.yaml", "yarn.lock"}
 
@@ -93,6 +94,24 @@ _SENSITIVE_NAMES = {
     "secrets.yml", "secrets.toml", "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519",
 }
 _SENSITIVE_SUFFIXES = {".pem", ".key", ".p12", ".pfx", ".jks", ".keystore"}
+
+
+def is_protected_workspace_path(relative: Path) -> bool:
+    """Shared deny-list for Agent file tools and controlled runner snapshots."""
+    parts = [part.casefold() for part in relative.parts]
+    if any(part in _SENSITIVE_DIRS or part in _IGNORED_DIRS for part in parts):
+        return True
+    if not parts:
+        return False
+    name = parts[-1]
+    return (
+        name == ".env"
+        or name.startswith(".env.")
+        or name.startswith(".envrc.")
+        or name in _SENSITIVE_NAMES
+        or name.endswith(".tfvars")
+        or Path(name).suffix.casefold() in _SENSITIVE_SUFFIXES
+    )
 
 
 def fs_tool_schemas() -> List[dict]:
@@ -168,20 +187,7 @@ class FileSystemToolExecutor:
 
     @staticmethod
     def _is_sensitive(relative: Path) -> bool:
-        parts = [part.casefold() for part in relative.parts]
-        if any(part in _SENSITIVE_DIRS or part in _IGNORED_DIRS for part in parts):
-            return True
-        if not parts:
-            return False
-        name = parts[-1]
-        return (
-            name == ".env"
-            or name.startswith(".env.")
-            or name.startswith(".envrc.")
-            or name in _SENSITIVE_NAMES
-            or name.endswith(".tfvars")
-            or Path(name).suffix.casefold() in _SENSITIVE_SUFFIXES
-        )
+        return is_protected_workspace_path(relative)
 
     @staticmethod
     def _is_binary(target: Path) -> bool:
