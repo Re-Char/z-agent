@@ -33,4 +33,4 @@ mkdir -p "$runtime_output"
 tar -xzf "$runtime_archive" -C "$runtime_output"
 
 "$runtime_output/bin/python" -c \
-  "import cryptography, fastapi, httpx, pydantic, uvicorn, zagent; print(zagent.__version__)"
+  "import cryptography, fastapi, httpx, jieba, opencc, pydantic, uvicorn, zagent; print(zagent.__version__)"

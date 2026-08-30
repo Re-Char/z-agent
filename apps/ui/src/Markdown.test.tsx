@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
-import { Markdown } from "./Markdown";
+import { CodeBlock, languageFromPath, Markdown } from "./Markdown";
 
 describe("Markdown", () => {
   it("renders fenced code with language toolbar and copy action", async () => {
@@ -26,5 +26,15 @@ describe("Markdown", () => {
     expect(container.querySelector("script")).not.toBeInTheDocument();
     await waitFor(() => expect(container.querySelector(".table-scroll table")).toBeInTheDocument());
     expect(screen.getByRole("link", { name: "外链" })).toHaveAttribute("rel", "noreferrer noopener");
+  });
+
+  it("highlights reusable tool code blocks and infers common file languages", () => {
+    const { container } = render(<CodeBlock code={"def main():\n    return True\n"} language={languageFromPath("src/main.py")} label="src/main.py" />);
+    expect(languageFromPath("web/App.TSX")).toBe("typescript");
+    expect(languageFromPath("config.yml")).toBe("yaml");
+    expect(languageFromPath("README.unknown")).toBe("text");
+    expect(container.querySelector("code.language-python")).toHaveClass("hljs");
+    expect(container.querySelector("code .hljs-keyword")).toHaveTextContent("def");
+    expect(screen.getByRole("button", { name: "复制 src/main.py 代码" })).toBeInTheDocument();
   });
 });

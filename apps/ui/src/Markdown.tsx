@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import DOMPurify from "dompurify";
 import hljs from "highlight.js/lib/core";
 import bash from "highlight.js/lib/languages/bash";
@@ -16,7 +16,7 @@ import sql from "highlight.js/lib/languages/sql";
 import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
-import "highlight.js/styles/github-dark-dimmed.css";
+import "highlight.js/styles/github.css";
 import { marked } from "marked";
 
 const LANGUAGES = {
@@ -25,6 +25,61 @@ const LANGUAGES = {
 for (const [name, grammar] of Object.entries(LANGUAGES)) hljs.registerLanguage(name, grammar);
 
 marked.setOptions({ gfm: true, breaks: true });
+
+const EXTENSION_LANGUAGES: Record<string, string> = {
+  ".bash": "bash", ".c": "c", ".cc": "cpp", ".cpp": "cpp", ".css": "css",
+  ".go": "go", ".h": "c", ".hpp": "cpp", ".htm": "xml", ".html": "xml",
+  ".java": "java", ".js": "javascript", ".jsx": "javascript", ".json": "json",
+  ".md": "markdown", ".py": "python", ".rs": "rust", ".sh": "bash", ".sql": "sql",
+  ".ts": "typescript", ".tsx": "typescript", ".xml": "xml", ".yaml": "yaml", ".yml": "yaml",
+};
+
+export function languageFromPath(path?: string) {
+  if (!path) return "text";
+  const filename = path.toLowerCase().split(/[\\/]/).pop() || "";
+  const dot = filename.lastIndexOf(".");
+  return dot >= 0 ? EXTENSION_LANGUAGES[filename.slice(dot)] || "text" : "text";
+}
+
+async function copyText(source: string) {
+  try {
+    await navigator.clipboard.writeText(source);
+  } catch (_) {
+    const textarea = document.createElement("textarea");
+    textarea.value = source;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    textarea.remove();
+  }
+}
+
+/** Shared renderer for tool payloads and Markdown code fences. */
+export function CodeBlock({ code, language = "text", label }: {
+  code: string; language?: string; label?: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  const normalizedLanguage = language.toLowerCase().replace(/[^a-z0-9_-]/g, "") || "text";
+  const highlighted = useMemo(() => hljs.getLanguage(normalizedLanguage)
+    ? hljs.highlight(code, { language: normalizedLanguage, ignoreIllegals: true }).value
+    : hljs.highlightAuto(code).value, [code, normalizedLanguage]);
+
+  async function copy() {
+    await copyText(code);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
+  return <div className="code-block tool-code-block">
+    <div className="code-toolbar">
+      <span>{label || normalizedLanguage}</span>
+      <button type="button" className={`code-copy${copied ? " copied" : ""}`} aria-label={`复制 ${label || normalizedLanguage} 代码`} onClick={copy}>
+        {copied ? "已复制" : "复制"}
+      </button>
+    </div>
+    <pre><code className={`hljs language-${normalizedLanguage}`} data-highlighted="yes" dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>
+  </div>;
+}
 
 /** Safe GFM renderer with external-link hardening and structured code blocks. */
 export function Markdown({ text, className }: { text: string; className?: string }) {
@@ -79,17 +134,7 @@ export function Markdown({ text, className }: { text: string; className?: string
         button.addEventListener("click", async (event) => {
           event.stopPropagation();
           const source = code ? code.textContent || "" : pre.textContent || "";
-          try {
-            await navigator.clipboard.writeText(source);
-          } catch (_) {
-            // Clipboard API can be unavailable in restricted contexts; fall back.
-            const textarea = document.createElement("textarea");
-            textarea.value = source;
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand("copy");
-            textarea.remove();
-          }
+          await copyText(source);
           button.textContent = "已复制";
           button.classList.add("copied");
           window.setTimeout(() => {

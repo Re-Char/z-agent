@@ -51,7 +51,7 @@ jobs:
         run: |
           test -x dist/desktop/mac-arm64/Z-Agent.app/Contents/Resources/core-runtime/bin/python
           dist/desktop/mac-arm64/Z-Agent.app/Contents/Resources/core-runtime/bin/python \
-            -c "import fastapi, uvicorn, zagent; print(zagent.__version__)"
+            -c "import fastapi, jieba, opencc, uvicorn, zagent; print(zagent.__version__)"
           hdiutil verify dist/desktop/Z-Agent-*-arm64.dmg
 
       - name: Create source archive, SBOM and checksums

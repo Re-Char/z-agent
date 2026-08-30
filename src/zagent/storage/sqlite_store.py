@@ -11,7 +11,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from zagent.context.tokenization import estimate_tokens, excerpt, searchable_text
+from zagent.context.tokenization import estimate_tokens, excerpt, normalize_text, searchable_text
 from zagent.domain.errors import ConcurrentUpdateError, NotFoundError, ValidationError
 from zagent.domain.models import EventRecord
 
@@ -49,7 +49,34 @@ class SqliteStore:
                 # Column already present on fresh databases created with v2 schema.
                 with contextlib.suppress(sqlite3.OperationalError):
                     self._db.execute(statement)
+            self._ensure_search_index_version()
         self._ensure_default_workspace()
+
+    def _ensure_search_index_version(self) -> None:
+        """Rebuild FTS when Chinese normalization/token rules change."""
+        index_version = 2
+        row = self._db.execute(
+            "SELECT value FROM metadata WHERE key='event_index_version'"
+        ).fetchone()
+        if row is not None and int(row["value"]) == index_version:
+            return
+        self._db.execute("DELETE FROM event_fts")
+        rows = self._db.execute("SELECT * FROM events ORDER BY session_id,sequence").fetchall()
+        self._db.executemany(
+            "INSERT INTO event_fts(event_id,session_id,search_text) VALUES(?,?,?)",
+            [
+                (
+                    item["event_id"],
+                    item["session_id"],
+                    searchable_text(self._serialize(self._deserialize_payload(item))),
+                )
+                for item in rows
+            ],
+        )
+        self._db.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('event_index_version',?)",
+            (index_version,),
+        )
 
     def _ensure_default_workspace(self) -> None:
         row = self._db.execute(
@@ -488,11 +515,11 @@ class SqliteStore:
                ORDER BY score LIMIT ?""",
             (expression, session_id, max(limit * 4, 20)),
         ).fetchall()
-        normalized_query = query.casefold()
+        normalized_query = normalize_text(query).casefold()
         weighted: List[Dict[str, Any]] = []
         for row in rows:
             event = self._to_event(row)
-            serialized = self._serialize(event.payload).casefold()
+            serialized = normalize_text(self._serialize(event.payload)).casefold()
             phrase_hit = 1.0 if normalized_query in serialized else 0.0
             strong_hits = sum(1 for term in strong if term in serialized)
             weak_hits = sum(1 for term in weak if term in serialized)
@@ -742,6 +769,305 @@ class SqliteStore:
             (session_id,),
         ).fetchone()
         return dict(row)
+
+    # --- long-term memory --------------------------------------------------
+
+    def _bump_memory_version(self) -> None:
+        self._db.execute("UPDATE metadata SET value=value+1 WHERE key='memory_version'")
+
+    @_serialized
+    def memory_version(self) -> int:
+        row = self._db.execute(
+            "SELECT value FROM metadata WHERE key='memory_version'"
+        ).fetchone()
+        return int(row["value"] if row else 0)
+
+    @staticmethod
+    def _memory_row(row: sqlite3.Row) -> Dict[str, Any]:
+        result = dict(row)
+        result["pinned"] = bool(result["pinned"])
+        return result
+
+    @_serialized
+    def get_memory(self, memory_id: str) -> Dict[str, Any]:
+        row = self._db.execute(
+            "SELECT * FROM memories WHERE memory_id=?", (memory_id,)
+        ).fetchone()
+        if row is None:
+            raise NotFoundError("memory not found")
+        result = self._memory_row(row)
+        sources = self._db.execute(
+            "SELECT event_id FROM memory_sources WHERE memory_id=? ORDER BY event_id",
+            (memory_id,),
+        ).fetchall()
+        result["source_event_ids"] = [item["event_id"] for item in sources]
+        return result
+
+    @_serialized
+    def find_active_memory(
+        self, scope_type: str, scope_id: str, memory_type: str, memory_key: str
+    ) -> Optional[Dict[str, Any]]:
+        row = self._db.execute(
+            """SELECT memory_id FROM memories
+               WHERE scope_type=? AND scope_id=? AND memory_type=? AND memory_key=?
+                 AND status='active' LIMIT 1""",
+            (scope_type, scope_id, memory_type, memory_key),
+        ).fetchone()
+        return self.get_memory(row["memory_id"]) if row else None
+
+    @_serialized
+    def create_memory(
+        self,
+        *,
+        scope_type: str,
+        scope_id: str,
+        memory_type: str,
+        memory_key: str,
+        content: str,
+        confidence: float,
+        status: str,
+        pinned: bool,
+        created_reason: str,
+        source_session_id: str,
+        source_event_ids: Sequence[str],
+        expires_at: Optional[str],
+        terms: Dict[str, float],
+    ) -> Dict[str, Any]:
+        self.get_session(source_session_id)
+        if status not in {"candidate", "active"}:
+            raise ValidationError("invalid initial memory status")
+        memory_id = "mem_" + uuid.uuid4().hex
+        now = self._now()
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        with self._db:
+            self._db.execute(
+                """INSERT INTO memories(
+                       memory_id,scope_type,scope_id,memory_type,memory_key,content,
+                       content_sha256,confidence,status,pinned,created_reason,
+                       source_session_id,supersedes_memory_id,created_at,updated_at,
+                       last_verified_at,expires_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)""",
+                (
+                    memory_id, scope_type, scope_id, memory_type, memory_key, content,
+                    digest, confidence, status, int(pinned), created_reason,
+                    source_session_id, now, now, now, expires_at,
+                ),
+            )
+            self._db.executemany(
+                "INSERT INTO memory_sources(memory_id,event_id) VALUES(?,?)",
+                [(memory_id, event_id) for event_id in source_event_ids],
+            )
+            self._db.executemany(
+                "INSERT INTO memory_terms(memory_id,term,weight) VALUES(?,?,?)",
+                [(memory_id, term, weight) for term, weight in terms.items()],
+            )
+            if status == "active":
+                self._db.execute(
+                    "INSERT INTO memory_fts(memory_id,scope_type,scope_id,search_text) VALUES(?,?,?,?)",
+                    (memory_id, scope_type, scope_id, searchable_text(f"{memory_key} {content}")),
+                )
+            self._insert_memory_audit(memory_id, "created", digest, {"status": status})
+            self._bump_memory_version()
+        return self.get_memory(memory_id)
+
+    @_serialized
+    def reinforce_memory(
+        self, memory_id: str, source_event_ids: Sequence[str], confidence: float
+    ) -> Dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory["status"] != "active":
+            raise ValidationError("only active memory can be reinforced")
+        now = self._now()
+        with self._db:
+            self._db.executemany(
+                "INSERT OR IGNORE INTO memory_sources(memory_id,event_id) VALUES(?,?)",
+                [(memory_id, event_id) for event_id in source_event_ids],
+            )
+            self._db.execute(
+                """UPDATE memories SET confidence=MAX(confidence,?),updated_at=?,
+                   last_verified_at=? WHERE memory_id=?""",
+                (confidence, now, now, memory_id),
+            )
+            self._insert_memory_audit(
+                memory_id,
+                "reinforced",
+                memory["content_sha256"],
+                {"source_event_ids": list(source_event_ids)},
+            )
+            self._bump_memory_version()
+        return self.get_memory(memory_id)
+
+    @_serialized
+    def activate_memory(
+        self, memory_id: str, *, supersedes_memory_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory["status"] not in {"candidate", "active"}:
+            raise ValidationError("only a candidate memory can be activated")
+        now = self._now()
+        with self._db:
+            if supersedes_memory_id:
+                previous = self.get_memory(supersedes_memory_id)
+                if (
+                    previous["scope_type"], previous["scope_id"], previous["memory_type"],
+                    previous["memory_key"],
+                ) != (
+                    memory["scope_type"], memory["scope_id"], memory["memory_type"],
+                    memory["memory_key"],
+                ):
+                    raise ValidationError("superseded memory has a different identity")
+                self._db.execute(
+                    "UPDATE memories SET status='superseded',updated_at=? WHERE memory_id=?",
+                    (now, supersedes_memory_id),
+                )
+                self._db.execute("DELETE FROM memory_fts WHERE memory_id=?", (supersedes_memory_id,))
+            else:
+                existing = self.find_active_memory(
+                    memory["scope_type"], memory["scope_id"], memory["memory_type"],
+                    memory["memory_key"],
+                )
+                if existing is not None and existing["memory_id"] != memory_id:
+                    raise ValidationError(
+                        "memory conflicts with an active value; supersedes_memory_id required"
+                    )
+            self._db.execute(
+                """UPDATE memories SET status='active',supersedes_memory_id=?,
+                   updated_at=?,last_verified_at=? WHERE memory_id=?""",
+                (supersedes_memory_id, now, now, memory_id),
+            )
+            self._db.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
+            self._db.execute(
+                "INSERT INTO memory_fts(memory_id,scope_type,scope_id,search_text) VALUES(?,?,?,?)",
+                (
+                    memory_id, memory["scope_type"], memory["scope_id"],
+                    searchable_text(f"{memory['memory_key']} {memory['content']}"),
+                ),
+            )
+            self._insert_memory_audit(
+                memory_id, "activated", memory["content_sha256"],
+                {"supersedes_memory_id": supersedes_memory_id},
+            )
+            self._bump_memory_version()
+        return self.get_memory(memory_id)
+
+    @_serialized
+    def forget_memory(self, memory_id: str, reason: str) -> Dict[str, Any]:
+        memory = self.get_memory(memory_id)
+        if memory["status"] == "deleted":
+            return memory
+        now = self._now()
+        with self._db:
+            self._db.execute(
+                """UPDATE memories SET content='',status='deleted',pinned=0,
+                   updated_at=? WHERE memory_id=?""",
+                (now, memory_id),
+            )
+            self._db.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
+            self._db.execute("DELETE FROM memory_terms WHERE memory_id=?", (memory_id,))
+            self._insert_memory_audit(
+                memory_id, "deleted", memory["content_sha256"], {"reason": reason}
+            )
+            self._bump_memory_version()
+        return self.get_memory(memory_id)
+
+    @_serialized
+    def list_memories(
+        self,
+        scope_pairs: Sequence[tuple[str, str]],
+        *,
+        statuses: Sequence[str] = ("active",),
+        pinned_only: bool = False,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        if not scope_pairs or not statuses:
+            return []
+        scope_sql = " OR ".join("(scope_type=? AND scope_id=?)" for _ in scope_pairs)
+        status_sql = ",".join("?" for _ in statuses)
+        pinned_sql = " AND pinned=1" if pinned_only else ""
+        params: list[Any] = [value for pair in scope_pairs for value in pair]
+        params.extend(statuses)
+        params.append(self._now())
+        params.append(max(1, min(limit, 500)))
+        rows = self._db.execute(
+            f"""SELECT memory_id FROM memories WHERE ({scope_sql})
+                 AND status IN ({status_sql}){pinned_sql}
+                 AND (expires_at IS NULL OR expires_at>?)
+                 ORDER BY pinned DESC, updated_at DESC LIMIT ?""",
+            params,
+        ).fetchall()
+        return [self.get_memory(row["memory_id"]) for row in rows]
+
+    @_serialized
+    def search_memory_lexical(
+        self, scope_pairs: Sequence[tuple[str, str]], query: str, limit: int
+    ) -> List[Dict[str, Any]]:
+        terms = searchable_text(query).split()
+        if not terms or not scope_pairs:
+            return []
+        quoted = lambda term: '"' + term.replace('"', '""') + '"'  # noqa: E731
+        expression = " OR ".join(quoted(term) for term in terms[:40])
+        scope_sql = " OR ".join("(m.scope_type=? AND m.scope_id=?)" for _ in scope_pairs)
+        params: list[Any] = [expression]
+        params.extend(value for pair in scope_pairs for value in pair)
+        params.append(max(limit, 20))
+        rows = self._db.execute(
+            f"""SELECT m.memory_id,bm25(memory_fts) AS score FROM memory_fts
+                 JOIN memories m ON m.memory_id=memory_fts.memory_id
+                 WHERE memory_fts MATCH ? AND ({scope_sql}) AND m.status='active'
+                   AND (m.expires_at IS NULL OR m.expires_at>?)
+                 ORDER BY score LIMIT ?""",
+            [*params[:-1], self._now(), params[-1]],
+        ).fetchall()
+        return [
+            {"memory": self.get_memory(row["memory_id"]), "score": float(row["score"])}
+            for row in rows
+        ]
+
+    @_serialized
+    def search_memory_terms(
+        self,
+        scope_pairs: Sequence[tuple[str, str]],
+        query_terms: Dict[str, float],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Search the persisted sparse term index without loading memory bodies."""
+        if not scope_pairs or not query_terms:
+            return []
+        term_sql = ",".join("?" for _ in query_terms)
+        scope_sql = " OR ".join("(m.scope_type=? AND m.scope_id=?)" for _ in scope_pairs)
+        params: list[Any] = list(query_terms)
+        params.extend(value for pair in scope_pairs for value in pair)
+        params.append(self._now())
+        rows = self._db.execute(
+            f"""SELECT mt.memory_id,mt.term,mt.weight FROM memory_terms mt
+                 JOIN memories m ON m.memory_id=mt.memory_id
+                 WHERE mt.term IN ({term_sql}) AND ({scope_sql}) AND m.status='active'
+                   AND (m.expires_at IS NULL OR m.expires_at>?)""",
+            params,
+        ).fetchall()
+        scores: Dict[str, float] = {}
+        for row in rows:
+            scores[row["memory_id"]] = scores.get(row["memory_id"], 0.0) + (
+                float(row["weight"]) * float(query_terms[row["term"]])
+            )
+        ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
+        return [
+            {"memory": self.get_memory(memory_id), "score": round(score, 6)}
+            for memory_id, score in ranked
+        ]
+
+    def _insert_memory_audit(
+        self, memory_id: str, action: str, content_sha256: str, details: Dict[str, Any]
+    ) -> None:
+        self._db.execute(
+            """INSERT INTO memory_audit(
+                   audit_id,memory_id,action,content_sha256,details_json,created_at
+               ) VALUES(?,?,?,?,?,?)""",
+            (
+                "maud_" + uuid.uuid4().hex, memory_id, action, content_sha256,
+                json.dumps(details, ensure_ascii=False), self._now(),
+            ),
+        )
 
     # --- permission broker -------------------------------------------------
 

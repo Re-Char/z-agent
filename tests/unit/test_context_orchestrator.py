@@ -87,3 +87,22 @@ def test_search_retrieve_and_archive_flow(context, store, session_id):
 def test_unknown_tool_is_rejected(context, session_id):
     with pytest.raises(ToolExecutionError):
         context.execute(session_id, "shell", {})
+
+
+def test_memory_tools_are_exposed_and_require_confirmed_sources(context, store, session_id):
+    names = {schema["function"]["name"] for schema in context.tool_schemas}
+    assert {"memory_remember", "memory_search", "memory_forget"} <= names
+    source = store.append_event(
+        session_id, "message", "user", "请记住我偏好中文", provenance="user"
+    )
+    created = context.execute(session_id, "memory_remember", {
+        "memory_type": "procedural",
+        "memory_key": "回复语言",
+        "content": "用户偏好简体中文回复",
+        "source_event_ids": [source.event_id],
+        "reason": "用户明确要求记住",
+        "scope": "user",
+        "confirmed": True,
+    })
+    found = context.execute(session_id, "memory_search", {"query": "回复语言"})
+    assert found["results"][0]["memory"]["memory_id"] == created["memory"]["memory_id"]

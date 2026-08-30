@@ -8,6 +8,7 @@ from pydantic import ValidationError as PydanticValidationError
 from zagent.domain.errors import ToolExecutionError
 from zagent.storage.sqlite_store import SqliteStore
 
+from .memory import LongTermMemory
 from .retrieval import HybridRetriever
 from .tool_arguments import CONTEXT_ARGUMENT_TYPES, StrictArgs, context_tool_schemas
 from .working_set import WorkingSetBuilder
@@ -19,10 +20,12 @@ class ContextOrchestrator:
         store: SqliteStore,
         working_sets: WorkingSetBuilder,
         retriever: HybridRetriever | None = None,
+        memory: LongTermMemory | None = None,
     ) -> None:
         self._store = store
         self._working_sets = working_sets
         self._retriever = retriever or HybridRetriever(store)
+        self._memory = memory or LongTermMemory(store)
 
     @property
     def tool_schemas(self) -> list[dict]:
@@ -120,6 +123,16 @@ class ContextOrchestrator:
             unique_ids = list(dict.fromkeys(values["event_ids"]))
             self._store.unpin_events(session_id, unique_ids)
             return {"unpinned": unique_ids}
+        if tool_name == "memory_remember":
+            return self._memory.remember(session_id, **values)
+        if tool_name == "memory_confirm":
+            return self._memory.confirm(session_id, **values)
+        if tool_name == "memory_search":
+            return {"results": self._memory.search(session_id, **values)}
+        if tool_name == "memory_list":
+            return {"memories": self._memory.list(session_id, **values)}
+        if tool_name == "memory_forget":
+            return self._memory.forget(session_id, **values)
         raise ToolExecutionError(f"unhandled context tool: {tool_name}")
 
     def _retrieve(self, session_id: str, event_ids: list[str], max_chars: int) -> list[dict]:

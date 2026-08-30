@@ -464,3 +464,11 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - `v0.2.1` tag 的首次 Actions 运行因 Conda base 中的 `conda-pack` 不在后续 shell PATH 而失败，未生成 Release；修复后发布版本提升为 `0.2.2`，并显式传入 `$(conda info --base)/bin/conda-pack`。
 - tag CI 不再读取 Apple 证书或公证 secrets，明确禁用 signing identity 自动发现；仍需验证包内 Core 和 DMG 完整性后才创建 GitHub Release。
 - Release 同时附带 DMG、blockmap、`latest-mac.yml`、CycloneDX npm SBOM、源码归档和 `SHA256SUMS.txt`，并明确标注“未签名/未公证”。
+
+## 22. v0.2.3 中文与长期记忆验收（2026-08-30）
+
+- 中文检索覆盖 NFKC、OpenCC 繁简、jieba、区域词别名和技术标识符；`專案的資料庫設定` 可稳定产生“项目/数据库/设置”检索词，繁体查询可以召回简体记忆。
+- 长期记忆覆盖 candidate→active、同 key 冲突候选→显式 supersede、跨 session/workspace 隔离、user 全局作用域、过期过滤、pinned 注入和 memory revision 缓存失效。
+- 安全回归验证 API key/私钥模式、internal、assistant reasoning、archive 与 checkpoint 均不会进入记忆；forget 后正文为空，FTS 与持久 sparse 两路均无结果，SHA tombstone 保留。
+- 持久化回归关闭并重新打开独立 `SqliteStore`，跨 Core 重启仍能从新 session 用区域词查询召回原 memory ID 和 source event ID。
+- 本版不声称已经引入稠密 embedding；当前默认路径完全本地、无需训练、不向第三方发送记忆正文。稠密模型仍需通过中文固定评测证明增益后再启用。

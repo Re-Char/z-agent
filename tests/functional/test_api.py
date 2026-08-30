@@ -45,6 +45,58 @@ def test_api_rejects_missing_auth(tmp_path):
         container.close()
 
 
+def test_api_long_term_memory_lifecycle_and_cross_session_recall(tmp_path):
+    container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
+    headers = {"Authorization": "Bearer test-token"}
+    try:
+        workspace_id = container.store.default_workspace_id()
+        first = container.store.create_session("记忆来源", workspace_id)["session_id"]
+        source = container.store.append_event(
+            first, "message", "user", "请记住：部署环境使用华为云", provenance="user"
+        )
+        second = container.store.create_session("后续会话", workspace_id)["session_id"]
+        with TestClient(create_api(container, auth_token="test-token")) as client:
+            created = client.post(
+                f"/v1/sessions/{first}/memories",
+                headers=headers,
+                json={
+                    "memory_type": "semantic",
+                    "memory_key": "部署云平台",
+                    "content": "部署环境使用华为云",
+                    "source_event_ids": [source.event_id],
+                    "reason": "用户明确要求记住",
+                    "confirmed": True,
+                    "pinned": True,
+                },
+            )
+            assert created.status_code == 201
+            memory_id = created.json()["memory"]["memory_id"]
+
+            recalled = client.get(
+                f"/v1/sessions/{second}/memories",
+                headers=headers,
+                params={"query": "部署在哪個雲平台"},
+            )
+            assert recalled.status_code == 200
+            assert recalled.json()["results"][0]["memory"]["memory_id"] == memory_id
+
+            deleted = client.request(
+                "DELETE",
+                f"/v1/sessions/{second}/memories/{memory_id}",
+                headers=headers,
+                json={"reason": "用户撤回该记忆"},
+            )
+            assert deleted.status_code == 200
+            assert deleted.json()["tombstone"] is True
+            assert client.get(
+                f"/v1/sessions/{second}/memories",
+                headers=headers,
+                params={"query": "华为云"},
+            ).json()["results"] == []
+    finally:
+        container.close()
+
+
 def test_api_rejects_a_stale_context_revision(tmp_path):
     container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
     try:

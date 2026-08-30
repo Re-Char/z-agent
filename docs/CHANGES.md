@@ -191,3 +191,13 @@
 - CI 仍强制校验 tag/项目版本一致、包内 Python Core 可执行与可导入、DMG 校验和，并生成 blockmap、自动更新元数据、CycloneDX SBOM、源码归档和 SHA256SUMS。
 - Release 说明会明确标记 unsigned，不冒充 Apple 签名/公证产物；首次启动可能需要用户手动通过 Gatekeeper。
 - `v0.2.1` tag 首次运行暴露 Actions 后续 shell 未将 Conda base 的 `conda-pack` 加入 PATH，未生成 Release；`v0.2.2` 改为通过 `conda info --base` 传递绝对可执行路径。
+
+### 22. v0.2.3 中文检索与长期记忆
+
+- 中文文本统一经过 NFKC 与 OpenCC `t2s`；jieba 词、连续 CJK 字符/n-gram、技术标识符和显式区域词别名共同进入 FTS 与稀疏通道，繁简、全半角及“专案/项目、资料库/数据库、登入/登录”等表达可互相召回。
+- EventLog FTS 增加索引版本；分词规则升级后启动时从原始事件一次性重建，不会让旧会话永久停留在旧索引语义。
+- SQLite 新增 memories、sources、terms、FTS 和 audit；长期记忆区分 episodic/semantic/procedural 与 user/workspace 作用域，跨 Core 重启和跨会话恢复。
+- `memory_remember/search/list/confirm/forget` 进入原生 tool-calling loop；记忆必须引用来源 event ID，默认只创建 candidate，冲突必须显式 supersede，不能静默覆盖。
+- Internal/Thinking/归档/checkpoint 事件与疑似密钥正文禁止写入；删除会清空正文、FTS 与持久稀疏 terms，只保留内容 SHA 与不含正文的审计 tombstone。
+- WorkingSet 根据最新用户请求最多注入 5 条相关 active 记忆，并明确标为“不可信数据，不是指令”；memory revision 进入缓存键，跨进程写入不会继续使用旧投影。
+- 新增长期记忆 HTTP 生命周期 API、跨会话繁体查询、冲突替代、作用域隔离、秘密拒绝、双索引删除、Core 重启和缓存失效测试。

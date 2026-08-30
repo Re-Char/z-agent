@@ -22,6 +22,8 @@
 - ✅ WorkingSet 缓存键现包含 SQLite `context_version`、workspace 持久版本、模型配置 SHA-256 和工具 schema SHA-256。GUI 会将读到的 revision 作为消息写入前置条件，过期写入返回 HTTP 409；两个 SQLite Store 的 CAS 竞争测试通过。
 - ✅ 真实 `deepseek-v4-flash` 在同一 session 中连续产生 10 个 checkpoint，然后续跑完成七步文件任务；最终文件为 `step=2\n`、SHA-256 为 `6224b8afa119441ab0a65db5d0896414779338cfc3085f281deb3b992b942dd4`，并且无 active checkpoint。
 - ✅ macOS arm64 已生成可重定位 Core bundle；打包 Electron 仅使用 `Resources/core-runtime/bin/python`，真实启动和杀掉 Core 后恢复通过。正式图标、自动更新、崩溃诊断和自包含 Release CI 已配置；项目决定 `v0.2.2` 起跳过 Apple 签名/公证并明确发布 unsigned DMG。
+- ✅ `v0.2.3` 完成无需训练的中文检索升级：NFKC 全半角归一化、OpenCC 繁转简、jieba 分词、连续 CJK n-gram、可审计区域词/技术词别名；索引规则有持久版本，旧 EventLog 在 Core 启动时一次性重建 FTS。
+- ✅ 长期记忆首个完整切片：SQLite 持久化 episodic/semantic/procedural，用户/工作区作用域、候选确认、冲突显式 supersede、来源 event ID、置信度/验证/过期、固定记忆、秘密与内部事件拒绝、删除正文与双索引并保留 tombstone。跨会话检索融合 FTS 与持久稀疏索引，相关已确认记忆进入 WorkingSet 且 memory revision 参与缓存键。
 - ⏳ 扩展生态余项：Open VSX/VSIX adapter、发布者公钥/透明日志信任链、Windows AppContainer backend 与项目 lockfile。当前 Ed25519 签名是本机安装证明，不冒充第三方发布者签名。
 
 ## 1. P0：长任务可靠性与证据化验收
@@ -61,6 +63,8 @@
 
 ## 3. P1：持久化稠密向量与中文评测
 
+**当前进度：** 中文规范化、lexical 与持久稀疏记忆索引已完成；稠密 embedding 仍保持可选/未默认启用。只有固定中文评测证明 dense 对现有双路检索有净增益后才引入，避免为了“向量化”增加模型下载、数据外发或运行时体积。
+
 - 保留 v1 Exact/FTS5 与稀疏 TF-IDF 作为事实召回通道，embedding 不能单独决定证据。
 - 提供可替换的本地或远程中文/多语 embedding provider，记录模型、维度、归一化与向量版本。
 - 向量索引以 `event_id` 为主键，支持增量写入、批量重建、模型迁移、损坏回退和删除传播。
@@ -70,6 +74,8 @@
 **验收：** 所有召回引用能恢复原事件与 SHA；向量库损坏可降级到 v1 检索；中文评测显示 dense 的实际增益后才默认启用。
 
 ## 4. P1：长期记忆
+
+**当前进度：** 下列生命周期、作用域、安全、检索、WorkingSet 注入和 HTTP/原生工具接口已在 `v0.2.3` 完成。GUI 的记忆管理页、导出与批量纠错仍待实现。
 
 - 区分 episodic（任务经历）、semantic（稳定事实）和 procedural（用户确认的偏好/流程）。
 - 记忆必须包含来源 event ID、置信度、作用域、创建原因、最后验证时间和过期策略。

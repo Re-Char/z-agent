@@ -12,6 +12,7 @@ from zagent.agent.runner_tools import ControlledRunnerExecutor
 from zagent.agent.runtime import AgentRuntime, AgentRuntimeLimits
 from zagent.agent.tools import CombinedToolExecutor, ContextToolExecutor
 from zagent.config import AppSettings
+from zagent.context.memory import LongTermMemory
 from zagent.context.orchestrator import ContextOrchestrator
 from zagent.context.working_set import WorkingSetBuilder
 from zagent.domain.errors import NotFoundError
@@ -57,13 +58,16 @@ class ApplicationContainer:
     def _build_runtime(self) -> None:
         self._close_provider()
         model = self.settings.model
+        memory = LongTermMemory(self.store)
         working_sets = WorkingSetBuilder(
             self.store,
             context_window=model.context_window,
             hard_limit_ratio=model.hard_limit_ratio,
             recent_event_limit=self.settings.recent_event_limit,
+            memory=memory,
         )
-        self.context = ContextOrchestrator(self.store, working_sets)
+        self.context = ContextOrchestrator(self.store, working_sets, memory=memory)
+        self.memory = memory
         self._provider = self._create_provider()
         tools = CombinedToolExecutor(
             ContextToolExecutor(self.context),

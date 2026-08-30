@@ -121,7 +121,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 
 `context_search` 当前采用两路可解释召回：SQLite FTS5/BM25，以及查询时构造的中文字符/词片段稀疏 TF-IDF 向量；两路通过 RRF 融合，完整短语命中拥有最终排序保护。向量通道只扫描最近的有界非敏感事件，不写入数据库；FTS5 仍负责全历史精确召回。
 
-真正的中文/多语稠密 embedding、向量索引持久化和长期记忆写入策略属于 v2，见 [v2-roadmap.md](v2-roadmap.md)。
+`v0.2.3` 已增加 OpenCC/jieba 中文规范化、索引版本重建，以及带来源、作用域和生命周期的 SQLite 长期记忆；记忆检索使用持久 FTS + 稀疏索引。中文/多语稠密 embedding 仍属于需先评测再启用的 v2 后续项，见 [v2-roadmap.md](v2-roadmap.md)。
 
 `Evidence Pack` 将多个命中组织为带引用的小型证据包：
 
@@ -589,6 +589,8 @@ v1 合并门槛：
 | EventLog / BlobStore | 已实现 | SQLite WAL、追加式事件、稳定 ID、SHA-256 与大内容外置 |
 | WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 BM25 + 稀疏 TF-IDF 向量融合无需训练 |
 | v2 checkpoint / DB cache version | 已实现 | SQLite 持久 context/workspace version；模型与工具 schema SHA 参与 WorkingSet 缓存；GUI 按 revision CAS 写入，过期返回 409；checkpoint 可续跑，invocation 幂等回放 |
+| 中文规范化与检索 | 已实现 | NFKC、OpenCC、jieba、区域词别名、CJK n-gram；EventLog FTS 索引规则版本化并可重建，Exact/FTS/稀疏结果保持可解释 |
+| 长期记忆 | v2 后端已实现 | episodic/semantic/procedural；候选确认、冲突替代、过期、来源 event ID、作用域隔离、持久 FTS+稀疏索引、WorkingSet 相关召回、删除 tombstone；GUI 管理与稠密 embedding 待后续 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
 | 工作区代码工具 | 已实现 | 安全读取/检索/创建目录、SHA-256 版本锁写入与精确替换；敏感文件、`.git`、依赖/缓存目录、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
@@ -598,4 +600,4 @@ v1 合并门槛：
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key。第三方执行采用三道门：server/extension 启用、独立 Host/transport、逐动作 Permission Broker；stdio/extension 还需 OS 沙箱可用。当前 macOS 测试宿主禁止嵌套 `sandbox-exec`，自动化验证了 fail-closed 路径；在普通桌面宿主上会先探测再运行。
 
-当前源码构建的 arm64 DMG 已内置可重定位 Python Core runtime 与正式图标，并通过实际启动、崩溃恢复和磁盘镜像校验。`v0.2.2` 起的发布策略为未签名自包含 DMG：无需 Apple 账号，但需要用户承担 Gatekeeper 手动放行和自动更新可能受 macOS 安全策略限制的产品取舍。
+当前源码构建的 arm64 DMG 已内置可重定位 Python Core runtime 与正式图标，并通过实际启动、崩溃恢复和磁盘镜像校验。`v0.2.2` 起的发布策略为未签名自包含 DMG：无需 Apple 账号，但需要用户承担 Gatekeeper 手动放行和自动更新可能受 macOS 安全策略限制的产品取舍。`v0.2.3` 将中文规范化依赖一并打入 Core runtime，目标机器无需另装 Python、OpenCC 或 jieba。

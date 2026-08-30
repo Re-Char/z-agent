@@ -1,3 +1,5 @@
+/// <reference types="vite/client" />
+
 interface StreamEvent {
   type: "content" | "tool_call" | "done" | "error" | "cancelled";
   text?: string;

@@ -34,6 +34,27 @@ class ExecuteContextToolRequest(StrictRequest):
     arguments: Dict[str, Any] = Field(default_factory=dict)
 
 
+class CreateMemoryRequest(StrictRequest):
+    memory_type: str = Field(pattern=r"^(episodic|semantic|procedural)$")
+    memory_key: str = Field(min_length=1, max_length=200)
+    content: str = Field(min_length=1, max_length=8000)
+    source_event_ids: List[str] = Field(min_length=1, max_length=20)
+    reason: str = Field(min_length=1, max_length=1000)
+    scope: str = Field(default="workspace", pattern=r"^(workspace|user)$")
+    confidence: float = Field(default=0.8, ge=0, le=1)
+    confirmed: bool = False
+    pinned: bool = False
+    expires_at: Optional[str] = None
+
+
+class ConfirmMemoryRequest(StrictRequest):
+    supersedes_memory_id: Optional[str] = Field(default=None, min_length=5, max_length=80)
+
+
+class ForgetMemoryRequest(StrictRequest):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class UpdateModelRequest(StrictRequest):
     name: Optional[str] = None
     provider: Optional[str] = None

@@ -1,5 +1,5 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Markdown } from "./Markdown";
+import { CodeBlock, languageFromPath, Markdown } from "./Markdown";
 
 type Session = { session_id: string; title: string; updated_at: string; event_count: number };
 type Event = { event_id: string; sequence: number; timestamp: string; kind: string; role: string; payload: unknown; token_estimate: number; tool_name?: string };
@@ -33,7 +33,13 @@ function friendlyError(reason: unknown) {
 }
 
 function payloadText(payload: unknown) {
-  return typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  if (typeof payload === "string") return payload;
+  const serialized = JSON.stringify(payload, null, 2);
+  return serialized === undefined ? String(payload ?? "") : serialized;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function eventPreview(event: Event) {
@@ -143,6 +149,12 @@ function App() {
   }, [activeWorkspaceId, refreshSessions]);
   useEffect(() => { refreshActive(activeId).catch((reason) => setError(friendlyError(reason))); }, [activeId, refreshActive]);
   useEffect(() => { setShowToolTrace(false); }, [activeId]);
+  useEffect(() => {
+    if (!inspectorOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setInspectorOpen(false); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [inspectorOpen]);
 
   // --- auto-scroll: follow the newest content unless the user scrolled up ---
   const timelineRef = useRef<HTMLElement>(null);
@@ -175,6 +187,18 @@ function App() {
     } catch (reason) {
       setError(friendlyError(reason));
     }
+  }
+
+  function selectSession(sessionId: string) {
+    activeRefreshGeneration.current += 1;
+    workspaceLandingId.current = undefined;
+    setActiveId(sessionId);
+    setEvents([]);
+    setContext(undefined);
+    setLastStats(undefined);
+    setStreaming(null);
+    setShowToolTrace(false);
+    setError("");
   }
 
   async function createWorkspace(workspace: Workspace) {
@@ -368,12 +392,12 @@ function App() {
           {workspaces.map((item) => <option key={item.workspace_id} value={item.workspace_id}>{item.name}{item.path ? ` · ${item.path}` : " · 未设置路径"}</option>)}
         </select>
         <button className="workspace-add" onClick={() => setWorkspaceDialogOpen(true)} title="新建工作区" aria-label="新建工作区">＋</button>
-        <button className="workspace-edit" onClick={() => setWorkspaceEditOpen(true)} title="编辑当前工作区的名称与路径" aria-label="编辑当前工作区">✎</button>
+        <button className="workspace-edit" disabled={!activeWorkspace} onClick={() => setWorkspaceEditOpen(true)} title="编辑当前工作区的名称与路径" aria-label="编辑当前工作区">✎</button>
       </div>
       <button className="new-task" onClick={createSession}>＋ 新建对话</button>
       <div className="section-label">最近任务</div>
-      <nav className="session-list">{sessions.map((session) =>
-        <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => { workspaceLandingId.current = undefined; setActiveId(session.session_id); }}>
+      <nav className="session-list" aria-label="最近任务">{sessions.map((session) =>
+        <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => selectSession(session.session_id)}>
           <span>{session.title}</span><small>{session.event_count} 个事件 · {formatRelativeTime(session.updated_at)}</small>
         </button>)}</nav>
       <div className="sidebar-actions">
@@ -389,11 +413,11 @@ function App() {
             <strong>{sessions.find((item) => item.session_id === activeId)?.title || "开始一个新任务"}</strong>
             <small>{activeWorkspace?.path || "工作区尚未设置项目路径"}</small>
           </div>
-          {config && config.models && config.models.length > 1
-            ? <select className="model-switcher" value={config.active_model_id} onChange={(event) => switchModel(event.target.value)} title="切换模型">
+          {config && (config.models && config.models.length > 1
+            ? <select className="model-switcher" value={config.active_model_id} onChange={(event) => switchModel(event.target.value)} title="切换模型" aria-label="切换模型">
                 {config.models.map((model) => <option key={model.id} value={model.id}>{modelLabel(model)}</option>)}
               </select>
-            : <span className="model-pill">{config?.model.provider} · {config?.model.model}</span>}
+            : <span className="model-pill">{config.model.provider} · {config.model.model}</span>)}
         </div>
         <div className="topbar-actions">
           <span className={`status-dot status-${coreStatus}`}>
@@ -412,7 +436,7 @@ function App() {
           <div><strong>先连接项目目录</strong><span>设置后才能读取和修改最新代码；密钥、凭据和工作区外文件始终不可访问。</span></div>
           <button type="button" onClick={() => setWorkspaceEditOpen(true)}>设置工作区</button>
         </div>}
-        {!visibleEvents.length && <div className="empty-state"><div className="orb">知</div><h1>从一个清晰的目标开始</h1><p>我会在工作区安全边界内阅读最新代码、调用工具并保留可追踪的上下文。</p><div className="empty-chips"><span>中文优先</span><span>代码可修改</span><span>敏感文件隔离</span></div></div>}
+        {!visibleEvents.length && <div className="empty-state"><div className="orb">Z</div><h1>从一个清晰的目标开始</h1><p>我会在工作区安全边界内阅读最新代码、调用工具并保留可追踪的上下文。</p><div className="empty-chips"><span>中文优先</span><span>代码可修改</span><span>敏感文件隔离</span></div></div>}
         {visibleEvents.map((item) => <EventCard key={item.event_id} item={item} pinned={pinnedIds.has(item.event_id)} onTogglePin={togglePin} showPin={!!context} showToolTrace={showToolTrace} />)}
         {busy && streaming && streaming.sessionId === activeId && <article className="event assistant streaming-bubble">
           <div className="event-meta"><span>Z-Agent</span><code>正在输出…</code></div>
@@ -428,12 +452,12 @@ function App() {
       {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="关闭错误提示">×</button></div>}
       <div className="composer-dock"><form className="composer" onSubmit={send}>
         <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-        <button type={busy ? "button" : "submit"} className={`send-button${busy ? " stop" : ""}`} disabled={!busy && !input.trim()} aria-label={busy ? "停止生成" : "发送消息"} onClick={busy ? stopGeneration : undefined}>{busy ? "停止" : "发送"}</button>
+        <button type={busy ? "button" : "submit"} className={`send-button${busy ? " stop" : ""}`} disabled={!busy && !input.trim()} aria-label={busy ? "停止生成" : "发送消息"} title={busy ? "停止生成" : "发送"} onClick={busy ? stopGeneration : undefined}>{busy ? "■" : "↑"}</button>
       </form><small>Enter 发送 · Shift+Enter 换行 · 文件修改会校验最新版本</small></div>
     </main>
 
     {inspectorOpen && <button className="inspector-scrim" type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭上下文检查器" />}
-    <aside className={`inspector${inspectorOpen ? " open" : ""}`}>
+    <aside className={`inspector${inspectorOpen ? " open" : ""}`} aria-label="上下文检查器" aria-hidden={!inspectorOpen} inert={!inspectorOpen}>
       <div className="inspector-title"><strong>上下文检查器</strong><div><span>LIVE</span><button type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭上下文检查器">×</button></div></div>
       {context?.warning && <div className="context-warning" role="alert">{context.warning}</div>}
       <div className="meter" title={`工作集 = 本次发送给模型的内容（系统提示 + 最近事件 + 固定证据），受预算限制。预算 = 上下文窗口 × 硬上限比例（当前 ${budget.toLocaleString()} tokens）。达到软上限（${softLimit.toLocaleString()}）后新事件可能被挤出。`}>
@@ -452,17 +476,17 @@ function App() {
       </div>
       {lastStats && <div className="inspector-section"><h3>最近任务</h3><p>{lastStats.total_tokens.toLocaleString()} tokens · 生成 {lastStats.completion_tokens.toLocaleString()} · 缓存 {lastStats.cache_hit_tokens.toLocaleString()}/{lastStats.cache_miss_tokens.toLocaleString()} · 耗时 {lastStats.elapsed_seconds.toFixed(1)}s</p></div>}
       <div className="inspector-section"><h3>当前工作集</h3>
-        {context?.working_set.included_event_ids.slice(-10).reverse().map((id) => {
+        {context?.working_set.included_event_ids.length ? context.working_set.included_event_ids.slice(-10).reverse().map((id) => {
           const event = events.find((item) => item.event_id === id);
           const pinned = pinnedIds.has(id);
           const preview = event ? eventPreview(event).replace(/\s+/g, " ").slice(0, 42) : "";
           return <div key={id} className="ws-item">
-            <span className={`ws-dot ${pinned ? "pinned" : ""}`} title={pinned ? "已固定为证据" : "普通事件"}>{pinned ? "📌" : "·"}</span>
+            <span className={`ws-dot ${pinned ? "pinned" : ""}`} title={pinned ? "已固定为证据" : "普通事件"}>{pinned ? "●" : "·"}</span>
             <code>{id.slice(-12)}</code>
             {preview && <span className="ws-preview">{preview}</span>}
             {pinned && event && <button className="ws-unpin" onClick={() => togglePin(event)} title="取消固定（点击后该事件可被预算清理）">取消</button>}
           </div>;
-        }) || <p>暂无事件</p>}
+        }) : <p>暂无事件</p>}
       </div>
       <div className="inspector-section"><h3>最近归档</h3>{context?.latest_archive
         ? <div className="archive-card">
@@ -523,7 +547,7 @@ function EventCard({ item, pinned, onTogglePin, showPin, showToolTrace }: {
   const toolCallPayload = isToolCallEvent && typeof payload === "object" && payload !== null ? payload as { content?: string; reasoning_content?: string; tool_calls?: Array<{ call_id: string; name: string; arguments: unknown }> } : null;
   const reasoning = isStandaloneReasoning && typeof payload === "string" ? payload : toolCallPayload?.reasoning_content;
 
-  const reasoningDisclosure = reasoning ? <Collapsible summary={<span className="reasoning-label">✦ 思考过程 <small>默认收起</small></span>}>
+  const reasoningDisclosure = reasoning ? <Collapsible summary={<span className="reasoning-label">思考过程 <small>默认收起</small></span>}>
     <Markdown text={reasoning} className="reasoning-content" />
   </Collapsible> : null;
 
@@ -534,16 +558,16 @@ function EventCard({ item, pinned, onTogglePin, showPin, showToolTrace }: {
         {reasoningDisclosure}
         {showToolTrace && (toolCallPayload.tool_calls || []).map((call) =>
           <Collapsible key={call.call_id} defaultOpen={false}
-            summary={<span className="tool-line"><span className="tool-line-name">🔧 {call.name}</span>
+            summary={<span className="tool-line"><span className="tool-line-name">{call.name}</span>
               <span className="tool-line-args">{safeArgsSummary(call.arguments)}</span></span>}>
-            <pre>{JSON.stringify(call.arguments, null, 2)}</pre>
+            <CodeBlock code={payloadText(call.arguments)} language={isRecord(call.arguments) || Array.isArray(call.arguments) ? "json" : "text"} label="调用参数" />
           </Collapsible>)}
       </div>;
     }
     if (isToolResult) {
-      const summary = typeof payload === "string" ? payload.replace(/\s+/g, " ").slice(0, 60) : JSON.stringify(payload).slice(0, 80);
-      return <Collapsible summary={<span className="tool-line"><span className="tool-line-name">⚙️ {item.tool_name || "tool_result"}</span><span className="tool-line-args">{summary}</span></span>}>
-        <pre>{payloadText(payload)}</pre>
+      const summary = toolResultSummary(payload);
+      return <Collapsible summary={<span className="tool-line"><span className="tool-line-name">{item.tool_name || "tool_result"}</span><span className="tool-line-args">{summary}</span></span>}>
+        <ToolResultBody item={item} />
       </Collapsible>;
     }
     if (item.role === "assistant" && typeof item.payload === "string") return <Markdown text={item.payload} />;
@@ -561,6 +585,30 @@ function EventCard({ item, pinned, onTogglePin, showPin, showToolTrace }: {
       </button>}
     </div>}
   </article>;
+}
+
+function toolResultSummary(payload: unknown) {
+  if (isRecord(payload)) {
+    if (typeof payload.path === "string") return `${payload.path}${payload.truncated === true ? " · 已截断" : ""}`;
+    if (typeof payload.error === "string") return payload.error.replace(/\s+/g, " ").slice(0, 80);
+  }
+  return payloadText(payload).replace(/\s+/g, " ").slice(0, 80);
+}
+
+function ToolResultBody({ item }: { item: Event }) {
+  const payload = item.payload;
+  if (isRecord(payload) && typeof payload.content === "string") {
+    const path = typeof payload.path === "string" ? payload.path : undefined;
+    const metadata = Object.fromEntries(Object.entries(payload).filter(([key]) => key !== "content"));
+    return <div className="tool-result-content">
+      <CodeBlock code={payload.content} language={languageFromPath(path)} label={path || `${item.tool_name || "工具"} 输出`} />
+      {!!Object.keys(metadata).length && <Collapsible summary="结果元数据">
+        <CodeBlock code={payloadText(metadata)} language="json" label="metadata" />
+      </Collapsible>}
+    </div>;
+  }
+  const structured = typeof payload === "object" && payload !== null;
+  return <CodeBlock code={payloadText(payload)} language={structured ? "json" : "text"} label={structured ? "工具结果" : `${item.tool_name || "工具"} 输出`} />;
 }
 
 function safeArgsSummary(argumentsValue: unknown) {

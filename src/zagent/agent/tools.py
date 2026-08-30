@@ -24,8 +24,8 @@ class ContextToolExecutor:
         return self._context.tool_schemas
 
     def execute(self, session_id: str, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
-        if not name.startswith("context_"):
-            raise ToolExecutionError(f"tool is not enabled in v1: {name}")
+        if not name.startswith(("context_", "memory_")):
+            raise ToolExecutionError(f"tool is not enabled: {name}")
         return self._context.execute(session_id, name, arguments)
 
 

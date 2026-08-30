@@ -25,12 +25,15 @@ from .schemas import (
     CallExtensionToolRequest,
     CallMcpToolRequest,
     CompleteMcpOAuthRequest,
+    ConfirmMemoryRequest,
     CreateExtensionRequest,
+    CreateMemoryRequest,
     CreateSessionRequest,
     CreateWorkspaceRequest,
     DecidePermissionRequest,
     ExecuteContextToolRequest,
     ExtensionHostRequest,
+    ForgetMemoryRequest,
     ImportExtensionRequest,
     ImportMcpRegistryRequest,
     SendMessageRequest,
@@ -193,6 +196,50 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         session_id: str, body: ExecuteContextToolRequest, core: CoreDependency
     ) -> dict:
         return core.context.execute(session_id, body.name, body.arguments)
+
+    @app.get("/v1/sessions/{session_id}/memories", dependencies=protected)
+    def list_memories(
+        session_id: str,
+        core: CoreDependency,
+        query: str = Query(default="", max_length=2000),
+        include_candidates: bool = Query(default=False),
+        limit: int = Query(default=50, ge=1, le=100),
+    ) -> dict:
+        if query.strip():
+            return {"results": core.memory.search(session_id, query, min(limit, 20))}
+        return {
+            "memories": core.memory.list(
+                session_id, include_candidates=include_candidates, limit=limit
+            )
+        }
+
+    @app.post(
+        "/v1/sessions/{session_id}/memories",
+        status_code=status.HTTP_201_CREATED,
+        dependencies=protected,
+    )
+    def create_memory(
+        session_id: str, body: CreateMemoryRequest, core: CoreDependency
+    ) -> dict:
+        return core.memory.remember(session_id, **body.model_dump())
+
+    @app.post("/v1/sessions/{session_id}/memories/{memory_id}/confirm", dependencies=protected)
+    def confirm_memory(
+        session_id: str,
+        memory_id: str,
+        body: ConfirmMemoryRequest,
+        core: CoreDependency,
+    ) -> dict:
+        return core.memory.confirm(session_id, memory_id, body.supersedes_memory_id)
+
+    @app.delete("/v1/sessions/{session_id}/memories/{memory_id}", dependencies=protected)
+    def forget_memory(
+        session_id: str,
+        memory_id: str,
+        body: ForgetMemoryRequest,
+        core: CoreDependency,
+    ) -> dict:
+        return core.memory.forget(session_id, memory_id, body.reason)
 
     @app.get("/v1/extensions", dependencies=protected)
     def list_extensions(core: CoreDependency) -> dict:

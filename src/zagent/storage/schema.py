@@ -71,6 +71,62 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session_created
     ON checkpoints(session_id, created_at);
+CREATE TABLE IF NOT EXISTS memories (
+    memory_id TEXT PRIMARY KEY,
+    scope_type TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
+    memory_type TEXT NOT NULL,
+    memory_key TEXT NOT NULL,
+    content TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    status TEXT NOT NULL,
+    pinned INTEGER NOT NULL DEFAULT 0,
+    created_reason TEXT NOT NULL,
+    source_session_id TEXT NOT NULL REFERENCES sessions(session_id),
+    supersedes_memory_id TEXT REFERENCES memories(memory_id),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_verified_at TEXT NOT NULL,
+    expires_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_memories_scope_status
+    ON memories(scope_type, scope_id, status, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_active_key
+    ON memories(scope_type, scope_id, memory_type, memory_key)
+    WHERE status='active';
+CREATE TABLE IF NOT EXISTS memory_sources (
+    memory_id TEXT NOT NULL REFERENCES memories(memory_id),
+    event_id TEXT NOT NULL REFERENCES events(event_id),
+    PRIMARY KEY(memory_id, event_id)
+);
+CREATE TABLE IF NOT EXISTS memory_terms (
+    memory_id TEXT NOT NULL REFERENCES memories(memory_id),
+    term TEXT NOT NULL,
+    weight REAL NOT NULL,
+    PRIMARY KEY(memory_id, term)
+);
+CREATE INDEX IF NOT EXISTS idx_memory_terms_term ON memory_terms(term);
+CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+    memory_id UNINDEXED,
+    scope_type UNINDEXED,
+    scope_id UNINDEXED,
+    search_text,
+    tokenize='unicode61'
+);
+CREATE TABLE IF NOT EXISTS memory_audit (
+    audit_id TEXT PRIMARY KEY,
+    memory_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS metadata (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO metadata(key, value) VALUES('memory_version', 0);
 CREATE TABLE IF NOT EXISTS tool_invocations (
     session_id TEXT NOT NULL REFERENCES sessions(session_id),
     call_id TEXT NOT NULL,

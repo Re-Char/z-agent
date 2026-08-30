@@ -65,7 +65,7 @@ def main() -> None:
                     "capabilities": {"tools": {"listChanged": False}},
                     "serverInfo": {
                         "name": "zagent-python-extension-host",
-                        "version": "0.2.2",
+                        "version": "0.2.3",
                         "pid": os.getpid(),
                     },
                 }

@@ -41,6 +41,86 @@ describe("Z-Agent desktop UI", () => {
     expect(await screen.findByText("核心离线")).toBeInTheDocument();
   });
 
+  it("keeps the context inspector inert until the user opens it", () => {
+    const { container } = render(<App />);
+    const inspector = container.querySelector("aside.inspector");
+    expect(inspector).not.toBeNull();
+    expect(inspector).toHaveAttribute("aria-hidden", "true");
+    expect(inspector).toHaveAttribute("inert");
+
+    fireEvent.click(screen.getByRole("button", { name: "切换上下文检查器" }));
+    expect(inspector).toHaveAttribute("aria-hidden", "false");
+    expect(inspector).not.toHaveAttribute("inert");
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(inspector).toHaveAttribute("aria-hidden", "true");
+    expect(inspector).toHaveAttribute("inert");
+  });
+
+  it("renders highlighted JSON arguments and highlighted file contents in tool records", async () => {
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "代码检查", updated_at: new Date().toISOString(), event_count: 2 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [
+        { event_id: "call1", sequence: 1, timestamp: new Date().toISOString(), kind: "assistant_tool_calls", role: "assistant", token_estimate: 5, payload: { tool_calls: [{ call_id: "c1", name: "fs_read", arguments: { path: "src/main.py" } }] } },
+        { event_id: "result1", sequence: 2, timestamp: new Date().toISOString(), kind: "tool_result", role: "tool", tool_name: "fs_read", token_estimate: 8, payload: { path: "src/main.py", content: "def main():\n    return True\n", truncated: false, sha256: "abc" } },
+      ] };
+      if (path === "/v1/sessions/s1/context") return { stats: { count: 2, tokens: 13 }, working_set: { tokens: 13, budget: 1000, included_event_ids: ["call1", "result1"], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    const { container } = render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "显示工具记录" }));
+    const disclosures = await screen.findAllByRole("button", { name: /fs_read/ });
+    disclosures.forEach((button) => fireEvent.click(button));
+
+    expect(container.querySelector("code.language-json .hljs-attr")).toHaveTextContent('"path"');
+    expect(container.querySelector("code.language-python .hljs-keyword")).toHaveTextContent("def");
+    expect(screen.getByRole("button", { name: "复制 src/main.py 代码" })).toBeInTheDocument();
+  });
+
+  it("clears stale conversation content immediately while switching sessions", async () => {
+    let resolveSecond: ((value: { events: unknown[] }) => void) | undefined;
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 2 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [
+        { session_id: "s1", title: "旧会话", updated_at: new Date().toISOString(), event_count: 1 },
+        { session_id: "s2", title: "新会话", updated_at: new Date().toISOString(), event_count: 1 },
+      ] };
+      if (path === "/v1/sessions/s1/events") return { events: [{ event_id: "old", sequence: 1, timestamp: new Date().toISOString(), kind: "message", role: "assistant", token_estimate: 2, payload: "只属于旧会话" }] };
+      if (path === "/v1/sessions/s1/context") return { stats: { count: 1, tokens: 2 }, working_set: { tokens: 2, budget: 1000, included_event_ids: ["old"], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      if (path === "/v1/sessions/s2/events") return await new Promise<{ events: unknown[] }>((resolve) => { resolveSecond = resolve; });
+      if (path === "/v1/sessions/s2/context") return { stats: { count: 1, tokens: 2 }, working_set: { tokens: 2, budget: 1000, included_event_ids: ["new"], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    expect((await screen.findAllByText("只属于旧会话")).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: /新会话/ }));
+    expect(screen.queryAllByText("只属于旧会话")).toHaveLength(0);
+    resolveSecond?.({ events: [{ event_id: "new", sequence: 1, timestamp: new Date().toISOString(), kind: "message", role: "assistant", token_estimate: 2, payload: "只属于新会话" }] });
+    expect((await screen.findAllByText("只属于新会话")).length).toBeGreaterThan(0);
+  });
+
+  it("shows an explicit empty working-set state and closes modals with Escape", async () => {
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "空会话", updated_at: new Date().toISOString(), event_count: 0 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [] };
+      if (path === "/v1/sessions/s1/context") return { stats: { count: 0, tokens: 0 }, working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByText("暂无事件")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "模型设置" }));
+    expect(screen.getByRole("dialog", { name: "模型设置" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "模型设置" })).not.toBeInTheDocument();
+  });
+
   it("opens a clean landing page after creating a workspace from an active conversation", async () => {
     let created = false;
     window.zagent.request = vi.fn(async (path: string, options) => {
