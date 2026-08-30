@@ -185,8 +185,9 @@
 - `WorkingSet` 缓存键加入模型配置与工具 schema 版本；workspace revision 独立持久。消息 API 支持 expected context revision，并发冲突返回 409，Electron GUI 已传递该 revision。
 - 真实 `deepseek-v4-flash` 同一 session 连续写入 10 个 checkpoint 后续跑完成，最终文件 SHA 由外部校验，数据库无 active checkpoint。
 
-### 21. v0.2.1 未签名自包含 Release
+### 21. v0.2.2 未签名自包含 Release
 
 - 根据项目发布决策取消 Apple Developer ID 和公证凭据门禁；tag CI 显式设置 `CSC_IDENTITY_AUTO_DISCOVERY=false`。
 - CI 仍强制校验 tag/项目版本一致、包内 Python Core 可执行与可导入、DMG 校验和，并生成 blockmap、自动更新元数据、CycloneDX SBOM、源码归档和 SHA256SUMS。
 - Release 说明会明确标记 unsigned，不冒充 Apple 签名/公证产物；首次启动可能需要用户手动通过 Gatekeeper。
+- `v0.2.1` tag 首次运行暴露 Actions 后续 shell 未将 Conda base 的 `conda-pack` 加入 PATH，未生成 Release；`v0.2.2` 改为通过 `conda info --base` 传递绝对可执行路径。

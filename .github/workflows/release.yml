@@ -24,8 +24,8 @@ jobs:
       - uses: conda-incubator/setup-miniconda@v3
         with:
           miniforge-version: latest
-          activate-environment: ""
-          auto-activate-base: true
+          activate-environment: base
+          auto-activate: true
 
       - name: Validate release version
         run: |
@@ -39,7 +39,7 @@ jobs:
 
       - name: Build relocatable Core and UI
         run: |
-          ZAGENT_CONDA_PACK="$(command -v conda-pack)" npm run build:core
+          ZAGENT_CONDA_PACK="$(conda info --base)/bin/conda-pack" npm run build:core
           npm run build:ui
 
       - name: Package unsigned DMG

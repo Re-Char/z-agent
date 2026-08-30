@@ -1,6 +1,6 @@
 # Z-Agent
 
-Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.1` 正在开发 v2：核心自行实现模型/工具循环、无损 EventLog、中文检索、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
+Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.2` 正在开发 v2：核心自行实现模型/工具循环、无损 EventLog、中文检索、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
 
 ## 当前能力
 
@@ -113,6 +113,6 @@ tests/
 构建可重定位 `core-runtime` 并内置到 DMG；打包后 Core 不会回退到系统 Python。本地 arm64
 DMG 已经过实际启动、Core 异常退出后重启与 `hdiutil verify`。
 
-`v0.2.1` 起的 tag 工作流会直接发布未签名 arm64 DMG，并上传 blockmap、
+`v0.2.2` 起的 tag 工作流会直接发布未签名 arm64 DMG，并上传 blockmap、
 `latest-mac.yml`、SBOM、源码归档和 `SHA256SUMS.txt`。已按项目发布策略跳过 Apple
 Developer ID 签名和公证；macOS 首次打开时可能需要在“系统设置 → 隐私与安全性”中手动允许。

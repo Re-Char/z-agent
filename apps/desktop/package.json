@@ -1,7 +1,7 @@
 {
   "name": "@zagent/desktop",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "中文优先、可审计的长程智能体桌面应用",
   "author": "Re-Char",
   "main": "main.cjs",

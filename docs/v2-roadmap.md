@@ -21,7 +21,7 @@
 - ✅ 受控 Runner 已完成固定 `python_unittest` / `python_pytest` / `npm_test` 模板、逐次 Permission Broker、去敏快照、无网络 OS 沙箱、超时/输出/文件数/总大小上限和可引用 evidence event ID；沙箱不可用时 fail closed。
 - ✅ WorkingSet 缓存键现包含 SQLite `context_version`、workspace 持久版本、模型配置 SHA-256 和工具 schema SHA-256。GUI 会将读到的 revision 作为消息写入前置条件，过期写入返回 HTTP 409；两个 SQLite Store 的 CAS 竞争测试通过。
 - ✅ 真实 `deepseek-v4-flash` 在同一 session 中连续产生 10 个 checkpoint，然后续跑完成七步文件任务；最终文件为 `step=2\n`、SHA-256 为 `6224b8afa119441ab0a65db5d0896414779338cfc3085f281deb3b992b942dd4`，并且无 active checkpoint。
-- ✅ macOS arm64 已生成可重定位 Core bundle；打包 Electron 仅使用 `Resources/core-runtime/bin/python`，真实启动和杀掉 Core 后恢复通过。正式图标、自动更新、崩溃诊断和自包含 Release CI 已配置；项目决定 `v0.2.1` 起跳过 Apple 签名/公证并明确发布 unsigned DMG。
+- ✅ macOS arm64 已生成可重定位 Core bundle；打包 Electron 仅使用 `Resources/core-runtime/bin/python`，真实启动和杀掉 Core 后恢复通过。正式图标、自动更新、崩溃诊断和自包含 Release CI 已配置；项目决定 `v0.2.2` 起跳过 Apple 签名/公证并明确发布 unsigned DMG。
 - ⏳ 扩展生态余项：Open VSX/VSIX adapter、发布者公钥/透明日志信任链、Windows AppContainer backend 与项目 lockfile。当前 Ed25519 签名是本机安装证明，不冒充第三方发布者签名。
 
 ## 1. P0：长任务可靠性与证据化验收

@@ -598,4 +598,4 @@ v1 合并门槛：
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key。第三方执行采用三道门：server/extension 启用、独立 Host/transport、逐动作 Permission Broker；stdio/extension 还需 OS 沙箱可用。当前 macOS 测试宿主禁止嵌套 `sandbox-exec`，自动化验证了 fail-closed 路径；在普通桌面宿主上会先探测再运行。
 
-当前源码构建的 arm64 DMG 已内置可重定位 Python Core runtime 与正式图标，并通过实际启动、崩溃恢复和磁盘镜像校验。`v0.2.1` 起的发布策略为未签名自包含 DMG：无需 Apple 账号，但需要用户承担 Gatekeeper 手动放行和自动更新可能受 macOS 安全策略限制的产品取舍。
+当前源码构建的 arm64 DMG 已内置可重定位 Python Core runtime 与正式图标，并通过实际启动、崩溃恢复和磁盘镜像校验。`v0.2.2` 起的发布策略为未签名自包含 DMG：无需 Apple 账号，但需要用户承担 Gatekeeper 手动放行和自动更新可能受 macOS 安全策略限制的产品取舍。
