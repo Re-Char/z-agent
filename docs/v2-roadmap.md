@@ -18,7 +18,7 @@
 - ✅ MCP Streamable HTTP 支持 JSON/SSE response、`Mcp-Session-Id`、`MCP-Protocol-Version`、Bearer token 和会话 DELETE；OAuth 支持 RFC 9728/8414/OIDC discovery、PKCE S256、resource audience、state、refresh 与 DCR。
 - ✅ 官方 MCP Registry v0.1 支持搜索、版本详情和 Streamable HTTP remote 导入；真实线上搜索与 remote 映射通过，导入保持未批准且不自动执行包安装脚本。
 - ✅ macOS `sandbox-exec` 与 Linux bubblewrap backend 已实现，文件/网络按 manifest/config 收敛；引擎缺失或宿主禁止嵌套时 fail closed。
-- ⏳ 尚未完成：受控 Runner、真实 provider 下的 3 次 checkpoint 长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。因此 P0 总验收仍未标记完成。
+- ⏳ 尚未完成：受控 Runner、真实 provider 下的 3 次 checkpoint 长任务验收、跨进程乐观锁、模型/工具 schema 版本纳入缓存键。2026-08-30 已在同一真实 DeepSeek 代码任务中恢复 2 次 checkpoint 并完成 197 个事件的四阶段任务，但未达到连续 3 次和 Runner 证据要求，因此 P0 总验收仍未标记完成。
 - ⏳ 扩展生态余项：Open VSX/VSIX adapter、发布者公钥/透明日志信任链、Windows AppContainer backend 与项目 lockfile。当前 Ed25519 签名是本机安装证明，不冒充第三方发布者签名。
 
 ## 1. P0：长任务可靠性与证据化验收

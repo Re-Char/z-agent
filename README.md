@@ -2,7 +2,7 @@
 
 Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.0` 正在开发 v2：核心自行实现模型/工具循环、无损 EventLog、中文检索、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
 
-## v1 能力
+## 当前能力
 
 - 追加式 SQLite EventLog，大输出进入内容寻址 BlobStore；
 - `context_status/search/retrieve/archive/pin/unpin` 原生上下文工具；中文搜索融合 FTS5/BM25 与本地稀疏 TF-IDF 向量，无需训练或向量数据库；
@@ -10,8 +10,8 @@ Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.
 - OpenAI-compatible 模型网关，可配置 Qwen、DeepSeek、GLM、Kimi、MiniMax 等国产模型；
 - 自研 tool-calling 循环、参数校验、最大轮次、任务超时和错误事件；
 - Electron + React 中文桌面 GUI，包含任务时间线和上下文检查器；
-- Z-Agent extension 目录/ZIP 安全导入、包哈希、启停与重启恢复；Node/Python 扩展代码仍默认不执行；
-- 受管 MCP stdio：显式授权、协议握手、工具发现/调用、进程关闭和原生 Agent tool-calling 接入；HTTP/SSE 暂只保存配置；
+- Z-Agent extension 目录/ZIP 安全导入、独立 Node/Python Extension Host、逐次权限审批、CycloneDX SBOM、本机安装签名与沙箱后端；
+- 受管 MCP stdio 与 Streamable HTTP：显式授权、协议握手、工具发现/调用、OAuth PKCE、官方 Registry remote 导入和原生 Agent tool-calling 接入；
 - 单元、集成、API 功能和前端组件测试；真实 DeepSeek 长程任务验收脚本。
 
 ## 环境
@@ -62,6 +62,18 @@ npm run build:ui
 
 测试不调用互联网；MCP 集成测试会启动真实本地 stdio 子进程并完成 JSON-RPC 握手、工具发现、调用和重启恢复，不以 mock 代替 transport。
 
+真实 provider 长程验收会产生模型 API 调用费用，需显式指定桌面数据目录和临时工作区。脚本可直接运行，无需额外设置 `PYTHONPATH`；默认遇到 checkpoint 后停止，只有显式设置续轮预算才会自动继续：
+
+```bash
+.conda/envs/zagent/bin/python scripts/long_task_e2e.py \
+  --data-dir "/path/to/Z-Agent/core" \
+  --workspace /private/tmp/zagent-long-task \
+  --phase build \
+  --max-continuations 2
+```
+
+后续阶段使用输出中的 `session_id`，通过 `--session-id` 继续同一会话。脚本不会读取或打印 API Key；checkpoint 续跑仍保留每轮工具数和时间上限。
+
 ## 项目结构
 
 ```text
@@ -92,3 +104,7 @@ tests/
 - MCP stdio 使用参数数组直接启动、从不经过 shell；默认进入 macOS `sandbox-exec` 或 Linux bubblewrap，沙箱不可用时拒绝执行。Streamable HTTP 支持 JSON/SSE 响应、会话头与 OAuth PKCE；旧版 SSE transport 不执行。
 - 扩展安装生成 CycloneDX 1.7 SBOM，并使用数据目录 trust key 的本机 Ed25519 安装签名；内容、SBOM 或签名变化都会阻断 Extension Host。
 - API Key 与 OAuth token 以权限 `0600` 的本地文件保存；迁移到系统 Keychain/Credential Manager 仍属于发布加固项。
+
+## 发布包状态
+
+`v0.2.0` DMG 是开发验收用 prerelease：已提供校验和，但尚未内置可重定位 Python Core runtime，也未做 Apple Developer ID 签名与公证。源码/Conda 开发模式可运行；当前 DMG 不保证在未安装 Python 依赖的干净 macOS 上启动。

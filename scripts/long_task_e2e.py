@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
-from zagent.bootstrap import ApplicationContainer
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+SOURCE_ROOT = REPOSITORY_ROOT / "src"
+if str(SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+from zagent.bootstrap import ApplicationContainer  # noqa: E402
+from zagent.domain.errors import AgentLimitError  # noqa: E402
 
 BUILD_PROMPT = """TASKBOARD_ACCEPTANCE_V1：请在当前空工作区完成一个可运行的 Python 3.12 项目 taskboard。
 
@@ -53,6 +60,31 @@ PHASES = {
 }
 
 
+def _send_with_continuations(agent, session_id: str, prompt: str, max_continuations: int):
+    """Resume evidence-backed checkpoints without hiding or bypassing per-turn limits."""
+    checkpoints: list[dict] = []
+    next_prompt = prompt
+    while True:
+        try:
+            return agent.send(session_id, next_prompt), checkpoints
+        except AgentLimitError as error:
+            checkpoint = error.checkpoint or {}
+            checkpoints.append(checkpoint)
+            print(json.dumps({
+                "checkpoint_saved": True,
+                "checkpoint_id": checkpoint.get("checkpoint_id"),
+                "reason": checkpoint.get("reason"),
+                "continuation": len(checkpoints),
+            }, ensure_ascii=False), flush=True)
+            if len(checkpoints) > max_continuations:
+                raise
+            checkpoint_id = checkpoint.get("checkpoint_id", "unknown")
+            next_prompt = (
+                f"继续当前阶段并完成未完成的工作。请先依据系统提示中的 checkpoint "
+                f"{checkpoint_id} 核对已完成证据，避免重复副作用。"
+            )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a real-provider long-task acceptance flow")
     parser.add_argument("--data-dir", required=True)
@@ -60,7 +92,16 @@ def main() -> None:
     parser.add_argument("--phase", choices=sorted(PHASES), required=True)
     parser.add_argument("--session-id")
     parser.add_argument("--feedback-file")
+    parser.add_argument(
+        "--max-continuations",
+        type=int,
+        default=0,
+        help="automatically resume at most N saved checkpoints (default: 0)",
+    )
     args = parser.parse_args()
+
+    if args.max_continuations < 0:
+        parser.error("--max-continuations must be non-negative")
 
     workspace = Path(args.workspace).resolve()
     if not workspace.is_dir():
@@ -98,7 +139,24 @@ def main() -> None:
             feedback_path = Path(args.feedback_file)
             feedback = feedback_path.read_text(encoding="utf-8", errors="replace")[:20_000]
             prompt += "\n\n这是外部测试器的真实输出，请据此修复后再完成本阶段：\n" + feedback
-        result = container.agent.send(session_id, prompt)
+        try:
+            result, checkpoints = _send_with_continuations(
+                container.agent, session_id, prompt, args.max_continuations
+            )
+        except AgentLimitError as error:
+            checkpoint = error.checkpoint or {}
+            print(json.dumps({
+                "completed": False,
+                "session_id": session_id,
+                "phase": args.phase,
+                "checkpoint_id": checkpoint.get("checkpoint_id"),
+                "message": str(error),
+                "resume_hint": (
+                    "rerun this phase with --session-id and optionally "
+                    "--max-continuations"
+                ),
+            }, ensure_ascii=False, indent=2))
+            raise SystemExit(2) from None
         events = container.store.list_events(session_id, limit=1000)
         context = container.context.execute(session_id, "context_status", {})
         print(json.dumps({
@@ -108,6 +166,8 @@ def main() -> None:
             "model": model.model,
             "final": result.final_event.payload,
             "tool_rounds": result.tool_rounds,
+            "checkpoint_continuations": len(checkpoints),
+            "checkpoint_ids": [item.get("checkpoint_id") for item in checkpoints],
             "tool_names": [event.tool_name for event in events if event.kind == "tool_result"],
             "event_count": len(events),
             "latest_archive": (

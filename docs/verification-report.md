@@ -406,3 +406,28 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - OS 沙箱：macOS sandbox-exec 与 Linux bubblewrap 命令策略均有回归；当前 Codex 宿主对嵌套 `sandbox-exec` 返回 `Operation not permitted`，探测后按设计 fail closed，没有绕过宿主限制。
 - 最终门禁：154 个 Python 测试通过，分支覆盖率 80.95%；12 个 Vitest、Ruff、TypeScript strict、Vite production build、Electron main/preload 语法检查全部通过。
 - 剩余边界：Open VSX/VSIX、第三方发布者公钥信任链、Windows AppContainer、系统 Keychain 和平台 DMG/Windows 签名公证仍属于发布/生态后续，未用本机安装签名冒充这些能力。
+
+## 20. v0.2.0 发布后全面回归与真实长任务（2026-08-30）
+
+### 20.1 全仓与实际进程链路
+
+- `npm test`：156 个 Python 测试、12 个 Vitest、Ruff 和 TypeScript strict 全部通过；Python 分支覆盖率 80.95%，高于 80% 门槛。
+- Vite production build、Python `compileall`、Electron main/preload 语法检查和 `git diff --check` 通过；构建产物约 JS 399.92KB（gzip 125.79KB）、CSS 22.69KB（gzip 6.06KB）。
+- Conda Core 以真实子进程启动，`/health`、`/v1/config`、`/v1/workspaces`、`/v1/sessions` 成功；错误 Bearer token 返回 401。
+- Electron 开发窗口实际加载，Accessibility tree 确认三栏、工作区、历史会话、Context Inspector 和默认收起的 Thinking disclosure 均存在；Computer Use 点击管道中断，未把未完成的自动点击冒充为通过，交互行为仍由 12 个 Vitest 覆盖。
+- 唯一测试警告是 Starlette TestClient 的 `httpx` 兼容层弃用提示，不影响当前结果，但需随上游迁移。
+
+### 20.2 真实 DeepSeek 四阶段代码任务
+
+- 临时空工作区 `/private/tmp/zagent-long-v020.YG75TB`，模型 `deepseek-v4-flash`，同一 session `ses_2a88af35f604437ca7ec6ec8e99bb0ff` 完成 build/audit/extend/finalize。
+- build 使用 6 个工具轮创建标准库 `taskboard` 项目；外部 `unittest` 首验 24/24，Python 3.12 隔离环境 editable install、module 入口、console script 和依赖状态转换通过。
+- 模型首轮自述误报 25 个测试；真实输出回传后，审计修正计数并发现 CLI 保存阶段未捕获 `OSError`，修复后仍为 24/24。
+- audit 与 extend 各触发一次 8 工具轮上限，均写入 checkpoint；同一 session 续跑后完成，没有重建项目。第二阶段加入按 ID 稳定排序的 JSON/CSV export，最终 32/32 项目测试和手工导出通过。
+- 最终累计 197 个事件、最新归档 `arc_3b684aa63610494284000269b113ecd2`、WorkingSet 17,242 tokens；最初需求仍固定为 321-token 权威验收基准。真实 provider checkpoint 恢复已验证 2 次，尚未满足路线图要求的连续 3 次与受控 Runner 证据。
+- 验收脚本现在可直接运行；checkpoint 会结构化输出，只有显式 `--max-continuations N` 才在预算内自动续轮，并新增两条单元测试验证续轮与预算停止。
+
+### 20.3 v0.2.0 DMG 边界实测
+
+- GitHub `v0.2.0` prerelease 已包含 arm64 DMG、blockmap、源码归档和 `SHA256SUMS.txt`；一次性发布工作流随后从 main 删除。
+- DMG 校验/挂载与 Electron 可执行文件本身正常，但包内没有可重定位 Python runtime。干净依赖条件下实际启动选择 macOS 系统 Python 3.9，并因缺少 `uvicorn` 退出，Core 无法上线。
+- 因此 v0.2.0 只能作为开发验收 prerelease；生产桌面发布仍须完成 Python Core bundle、Apple Developer ID 签名与公证，不能把“DMG 构建成功”表述为“干净机器可运行”。
