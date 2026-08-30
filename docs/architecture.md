@@ -422,8 +422,8 @@ Git 对象与构建目录的项目快照放入临时执行目录，按预定义�
 
 Electron Builder 负责将 runtime、正式图标和 UI 打包进 DMG。主进程用1/2/4 秒退避最多恢复
 Core 三次，将最后崩溃原因以 `0600` 写入用户数据目录；`electron-updater` 消费同一 Release 中的
-`latest-mac.yml` 和 blockmap。tag CI 必须同时具备 Developer ID 和 App Store Connect API Key，否则在签名/
-公证阶段失败，不发布未签名产物。
+`latest-mac.yml` 和 blockmap。当前项目选择未签名发行：tag CI 显式禁用签名自动发现，
+改为强制验证包内 Core、DMG 校验和和版本/tag 一致性，Release 页明确标注 unsigned。
 
 | 项目 | 可行性 | 说明 |
 | --- | --- | --- |
@@ -598,4 +598,4 @@ v1 合并门槛：
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key。第三方执行采用三道门：server/extension 启用、独立 Host/transport、逐动作 Permission Broker；stdio/extension 还需 OS 沙箱可用。当前 macOS 测试宿主禁止嵌套 `sandbox-exec`，自动化验证了 fail-closed 路径；在普通桌面宿主上会先探测再运行。
 
-当前源码构建的 arm64 DMG 已内置可重定位 Python Core runtime 与正式图标，并通过实际启动、崩溃恢复和磁盘镜像校验。仓库 tag CI 已强制 Apple 签名与公证，但在未配置开发者证书/API Key 前不能产出真正已公证 Release，不得将本地未签名验收包描述为正式发行包。
+当前源码构建的 arm64 DMG 已内置可重定位 Python Core runtime 与正式图标，并通过实际启动、崩溃恢复和磁盘镜像校验。`v0.2.1` 起的发布策略为未签名自包含 DMG：无需 Apple 账号，但需要用户承担 Gatekeeper 手动放行和自动更新可能受 macOS 安全策略限制的产品取舍。

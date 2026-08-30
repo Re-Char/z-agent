@@ -440,7 +440,7 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - `npm run build:ui` 和 electron-builder arm64 DMG 成功；产物约 192 MB，`hdiutil verify` 通过，同时生成 blockmap 与 `latest-mac.yml`。
 - 真实启动打包后的 `Z-Agent.app`，UI 显示 Core 在线；进程命令明确为 `Contents/Resources/core-runtime/bin/python -m zagent.server`，没有使用系统 Python。
 - 杀掉已就绪 Core PID 后，Electron 在退避窗口内拉起新 PID，仍使用包内 Python；UI 保持可用。
-- 本机无 Developer ID identity 且未配置公证凭据，所以本地 DMG 仅为未签名验收产物。持久 tag workflow 会在凭据缺失时失败，不会发布伪公证产物。现有 GitHub `v0.1.1` 没有 `latest-mac.yml`，因此新自动更新客户端的本次线上检查预期返回 404；下一个新工作流 Release 才会提供元数据。
+- 本机无 Developer ID identity 且未配置公证凭据，所以本地 DMG 为未签名产物。项目随后明确决定跳过 Apple 认证；`v0.2.1` tag workflow 会发布同等的 unsigned 自包含 DMG，并在 Release 说明中披露 Gatekeeper 风险。
 
 ### 21.2 受控 Runner 与缓存/数据库并发
 
@@ -458,3 +458,9 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 
 - Python：164 个测试通过，总覆盖率不低于 80%；Ruff 通过。
 - UI：13 个 Vitest 通过，包含 Markdown、Thinking 收起、工作区初始页、Core 恢复状态和 CAS revision 传递；TypeScript strict 通过。
+
+### 21.5 v0.2.1 发布策略
+
+- 发布版本提升为 `0.2.1`，以区分已存在的旧 `v0.2.0` prerelease。
+- tag CI 不再读取 Apple 证书或公证 secrets，明确禁用 signing identity 自动发现；仍需验证包内 Core 和 DMG 完整性后才创建 GitHub Release。
+- Release 同时附带 DMG、blockmap、`latest-mac.yml`、CycloneDX npm SBOM、源码归档和 `SHA256SUMS.txt`，并明确标注“未签名/未公证”。

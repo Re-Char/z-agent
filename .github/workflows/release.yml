@@ -1,4 +1,4 @@
-name: Release signed desktop build
+name: Release desktop build
 
 on:
   push:
@@ -27,23 +27,10 @@ jobs:
           activate-environment: ""
           auto-activate-base: true
 
-      - name: Validate release version and Apple credentials
-        env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      - name: Validate release version
         run: |
           expected_tag="v$(node -p "require('./package.json').version")"
           test "$GITHUB_REF_NAME" = "$expected_tag"
-          test -n "$CSC_LINK"
-          test -n "$CSC_KEY_PASSWORD"
-          test -n "$APPLE_API_KEY_P8"
-          test -n "$APPLE_API_KEY_ID"
-          test -n "$APPLE_API_ISSUER"
-          printf '%s' "$APPLE_API_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
-          chmod 600 "$RUNNER_TEMP/AuthKey.p8"
 
       - name: Install build dependencies
         run: |
@@ -55,21 +42,16 @@ jobs:
           ZAGENT_CONDA_PACK="$(command -v conda-pack)" npm run build:core
           npm run build:ui
 
-      - name: Sign, notarize and package DMG
+      - name: Package unsigned DMG
         env:
-          CSC_LINK: ${{ secrets.CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
-          APPLE_API_KEY: ${{ runner.temp }}/AuthKey.p8
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          ZAGENT_REQUIRE_NOTARIZATION: "1"
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: npm run package -w @zagent/desktop -- --mac dmg --arm64 --publish never
 
-      - name: Verify signature, notarization and image
+      - name: Verify bundled Core and disk image
         run: |
-          codesign --verify --deep --strict --verbose=2 dist/desktop/mac-arm64/Z-Agent.app
-          xcrun stapler validate dist/desktop/mac-arm64/Z-Agent.app
-          spctl --assess --type execute --verbose=4 dist/desktop/mac-arm64/Z-Agent.app
+          test -x dist/desktop/mac-arm64/Z-Agent.app/Contents/Resources/core-runtime/bin/python
+          dist/desktop/mac-arm64/Z-Agent.app/Contents/Resources/core-runtime/bin/python \
+            -c "import fastapi, uvicorn, zagent; print(zagent.__version__)"
           hdiutil verify dist/desktop/Z-Agent-*-arm64.dmg
 
       - name: Create source archive, SBOM and checksums
@@ -103,5 +85,6 @@ jobs:
               dist/desktop/Z-Agent-*-arm64.dmg.blockmap dist/desktop/latest-mac.yml \
               dist/desktop/Z-Agent-*-source.tar.gz \
               dist/desktop/Z-Agent-*-npm-sbom.cdx.json \
-              dist/desktop/SHA256SUMS.txt --verify-tag --generate-notes
+              dist/desktop/SHA256SUMS.txt --verify-tag --generate-notes \
+              --notes "Unsigned macOS build: Apple Developer ID signing/notarization is intentionally skipped. The app bundles its own Python Core; macOS may require manual approval on first launch."
           fi
