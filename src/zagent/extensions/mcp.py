@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import stat
+import sys
+import tempfile
 import threading
+import zipfile
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional
 
 from zagent.domain.errors import NotFoundError, ValidationError
@@ -15,13 +20,17 @@ from .oauth import MCPOAuthManager
 
 MCP_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MAX_IMPORT_BYTES = 1024 * 1024
+MAX_BUNDLE_FILES = 16_384
+MAX_BUNDLE_BYTES = 128 * 1024 * 1024
 
 
 class MCPConfigRegistry:
     """Persistent MCP server definitions. Secrets are referenced by env name, never stored."""
 
     def __init__(self, data_dir: str) -> None:
-        self._path = Path(data_dir) / "mcp.json"
+        self.data_dir = Path(data_dir)
+        self._path = self.data_dir / "mcp.json"
         self._lock = threading.RLock()
 
     def list_servers(self) -> List[Dict[str, Any]]:
@@ -210,6 +219,178 @@ class MCPManager:
         self.disconnect(name)
         return server
 
+    def import_server(self, source_path: str, *, replace: bool = False) -> Dict[str, Any]:
+        """Import one portable local MCP definition without importing approval state."""
+        candidate = Path(source_path).expanduser()
+        if candidate.is_symlink():
+            raise ValidationError("MCP import source must not be a symlink")
+        source = candidate.resolve()
+        if not source.is_file():
+            raise ValidationError("MCP import source must be a regular JSON file")
+        if source.suffix.lower() in {".mcpb", ".dxt"}:
+            return self._import_bundle(source, replace=replace)
+        try:
+            if source.stat().st_size > MAX_IMPORT_BYTES:
+                raise ValidationError("MCP import file exceeds 1 MiB")
+            value = json.loads(source.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValidationError(f"invalid MCP import file: {exc}") from exc
+        spec = self._import_spec(value)
+        name = str(spec.get("name", "")).strip()
+        existing = {item["name"] for item in self.registry.list_servers()}
+        if name in existing and not replace:
+            raise ValidationError(f"MCP server already exists: {name}")
+        if spec.get("transport", "stdio") == "stdio":
+            if spec.get("command") == "${ZAGENT_PYTHON}":
+                spec["command"] = sys.executable
+            spec["cwd"] = self._resolve_import_path(source.parent, spec.get("cwd"), directory=True)
+            spec["args"] = [
+                self._resolve_import_argument(source.parent, str(argument))
+                for argument in spec.get("args", [])
+            ]
+        # Approval is a local user decision and must never arrive from a package.
+        spec["approved"] = False
+        return self.add_server(spec)
+
+    def _import_bundle(self, source: Path, *, replace: bool) -> Dict[str, Any]:
+        if not zipfile.is_zipfile(source):
+            raise ValidationError("MCPB/DXT package must be a ZIP archive")
+        install_root = self.registry.data_dir / "mcp-bundles"
+        install_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=".install-", dir=install_root))
+        package = staging / "package"
+        try:
+            self._extract_bundle(source, package)
+            manifest_path = package / "manifest.json"
+            if not manifest_path.is_file():
+                children = [item for item in package.iterdir() if item.is_dir()]
+                if len(children) == 1 and (children[0] / "manifest.json").is_file():
+                    package = children[0]
+                    manifest_path = package / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            spec = self._bundle_spec(package, manifest)
+            name = spec["name"]
+            existing = {item["name"] for item in self.registry.list_servers()}
+            if name in existing and not replace:
+                raise ValidationError(f"MCP server already exists: {name}")
+            target = install_root / name
+            if target.exists() and not replace:
+                raise ValidationError(f"MCP bundle already exists: {name}")
+            backup = staging / "previous"
+            if target.exists():
+                target.replace(backup)
+            package.replace(target)
+            spec = self._bundle_spec(target, manifest)
+            server = self.add_server(spec)
+            if backup.exists():
+                shutil.rmtree(backup)
+            return {**server, "bundle_format": "mcpb", "bundle_version": manifest["manifest_version"]}
+        except (OSError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+            raise ValidationError(f"invalid MCP bundle: {exc}") from exc
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+
+    @staticmethod
+    def _extract_bundle(source: Path, target: Path) -> None:
+        target.mkdir(parents=True)
+        total = 0
+        with zipfile.ZipFile(source) as archive:
+            members = archive.infolist()
+            if len(members) > MAX_BUNDLE_FILES:
+                raise ValidationError("MCP bundle contains too many files")
+            for member in members:
+                path = PurePosixPath(member.filename)
+                mode = member.external_attr >> 16
+                if path.is_absolute() or ".." in path.parts or stat.S_ISLNK(mode):
+                    raise ValidationError("MCP bundle contains an unsafe path")
+                total += member.file_size
+                if total > MAX_BUNDLE_BYTES:
+                    raise ValidationError("MCP bundle exceeds 128 MiB")
+                destination = target.joinpath(*path.parts)
+                if member.is_dir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                else:
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with archive.open(member) as reader, destination.open("wb") as writer:
+                        shutil.copyfileobj(reader, writer)
+
+    @classmethod
+    def _bundle_spec(cls, root: Path, manifest: Any) -> Dict[str, Any]:
+        if not isinstance(manifest, dict) or str(manifest.get("manifest_version")) not in {
+            "0.1", "0.2", "0.3", "0.4"
+        }:
+            raise ValidationError("unsupported MCPB manifest_version")
+        name = str(manifest.get("name", "")).strip()
+        if not MCP_NAME_RE.fullmatch(name):
+            raise ValidationError("invalid MCPB name")
+        server = manifest.get("server")
+        if not isinstance(server, dict):
+            raise ValidationError("MCPB manifest requires server")
+        runtime = str(server.get("type", ""))
+        if runtime not in {"node", "python", "binary"}:
+            raise ValidationError(f"unsupported MCPB server type: {runtime}")
+        entry = cls._bundle_path(root, str(server.get("entry_point", "")))
+        config = server.get("mcp_config", {})
+        if not isinstance(config, dict):
+            raise ValidationError("invalid MCPB mcp_config")
+        defaults = cls._bundle_defaults(manifest.get("user_config", {}))
+        raw_args = config.get("args", [])
+        if not isinstance(raw_args, list) or not all(isinstance(item, str) for item in raw_args):
+            raise ValidationError("invalid MCPB argument list")
+        args = [cls._substitute_bundle(item, root, defaults) for item in raw_args]
+        entry_text = str(entry)
+        if runtime in {"node", "python"} and not any(item == entry_text for item in args):
+            args.insert(0, entry_text)
+        if runtime == "python":
+            command = sys.executable
+        elif runtime == "node":
+            command = shutil.which("node") or "node"
+        else:
+            command = entry_text
+            if args and args[0] == entry_text:
+                args.pop(0)
+        return {
+            "name": name,
+            "transport": "stdio",
+            "command": command,
+            "args": args,
+            "cwd": str(root),
+            "env": [],
+            "sandbox": True,
+            "sandbox_read_roots": [str(root)],
+            "sandbox_write_roots": [],
+            "network": bool(manifest.get("privacy_policies")),
+            "enabled": True,
+            "approved": False,
+        }
+
+    @staticmethod
+    def _bundle_path(root: Path, value: str) -> Path:
+        candidate = (root / value).resolve()
+        if root.resolve() not in candidate.parents or not candidate.is_file():
+            raise ValidationError("MCPB entry_point escapes the bundle or does not exist")
+        return candidate
+
+    @staticmethod
+    def _bundle_defaults(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(name): config.get("default", "")
+            for name, config in value.items()
+            if isinstance(config, dict) and not config.get("sensitive", False)
+        }
+
+    @staticmethod
+    def _substitute_bundle(value: str, root: Path, defaults: Dict[str, Any]) -> str:
+        result = value.replace("${__dirname}", str(root))
+        for name, default in defaults.items():
+            replacement = str(default).lower() if isinstance(default, bool) else str(default)
+            result = result.replace(f"${{user_config.{name}}}", replacement)
+        result = result.replace("${HOME}", str(Path.home()))
+        return re.sub(r"\$\{user_config\.[^}]+\}", "", result)
+
     def set_state(
         self, name: str, *, enabled: Optional[bool] = None, approved: Optional[bool] = None
     ) -> Dict[str, Any]:
@@ -285,6 +466,73 @@ class MCPManager:
             self._clients.clear()
         for client in clients:
             client.close()
+
+    @staticmethod
+    def _import_spec(value: Any) -> Dict[str, Any]:
+        if not isinstance(value, dict):
+            raise ValidationError("MCP import file must be a JSON object")
+        if value.get("schema_version") == 1 and isinstance(value.get("server"), dict):
+            return dict(value["server"])
+        catalog = value.get("mcpServers")
+        if not isinstance(catalog, dict):
+            catalog = value.get("servers")
+        if not isinstance(catalog, dict) or len(catalog) != 1:
+            raise ValidationError(
+                "MCP import requires one server in server, mcpServers, or servers"
+            )
+        name, raw = next(iter(catalog.items()))
+        if not isinstance(raw, dict):
+            raise ValidationError("MCP server definition must be an object")
+        url = raw.get("url")
+        if isinstance(url, str) and url:
+            return {
+                "name": name,
+                "transport": "http",
+                "url": url,
+                "oauth": bool(raw.get("oauth", False)),
+                "enabled": True,
+                "approved": False,
+            }
+        env_value = raw.get("env", {})
+        if env_value is not None and not isinstance(env_value, dict):
+            raise ValidationError("standard MCP env must be an object")
+        return {
+            "name": name,
+            "transport": "stdio",
+            "command": raw.get("command", ""),
+            "args": raw.get("args", []),
+            "cwd": raw.get("cwd"),
+            # Secret values from foreign configs are deliberately not persisted.
+            # Only names already present in the Core environment are forwarded.
+            "env": list((env_value or {}).keys()),
+            "timeout_seconds": raw.get("timeout_seconds", 15),
+            "sandbox": raw.get("sandbox", True),
+            "network": raw.get("network", False),
+            "enabled": raw.get("enabled", True),
+            "approved": False,
+        }
+
+    @staticmethod
+    def _resolve_import_path(root: Path, value: Any, *, directory: bool) -> Optional[str]:
+        if value in (None, ""):
+            return None
+        candidate = Path(str(value)).expanduser()
+        resolved = candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve()
+        if root != resolved and root not in resolved.parents:
+            raise ValidationError("relative MCP import path escapes the package directory")
+        if directory and not resolved.is_dir():
+            raise ValidationError(f"MCP import working directory does not exist: {value}")
+        return str(resolved)
+
+    @classmethod
+    def _resolve_import_argument(cls, root: Path, value: str) -> str:
+        if not value.startswith(("./", "../")):
+            return value
+        resolved = cls._resolve_import_path(root, value, directory=False)
+        assert resolved is not None
+        if not Path(resolved).is_file():
+            raise ValidationError(f"MCP import argument file does not exist: {value}")
+        return resolved
 
     def _connected_client(self, name: str) -> Any:
         server = self.registry.get_server(name)

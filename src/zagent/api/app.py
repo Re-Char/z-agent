@@ -37,6 +37,7 @@ from .schemas import (
     ForgetMemoryRequest,
     ImportExtensionRequest,
     ImportMcpRegistryRequest,
+    ImportMcpServerRequest,
     SendMessageRequest,
     UpdateExtensionRequest,
     UpdateMcpServerRequest,
@@ -358,6 +359,10 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     @app.post("/v1/mcp/servers", status_code=status.HTTP_201_CREATED, dependencies=protected)
     def add_mcp_server(body: AddMcpServerRequest, core: CoreDependency) -> dict:
         return {"server": core.mcp.add_server(body.spec())}
+
+    @app.post("/v1/mcp/import", status_code=status.HTTP_201_CREATED, dependencies=protected)
+    def import_mcp_server(body: ImportMcpServerRequest, core: CoreDependency) -> dict:
+        return {"server": core.mcp.import_server(body.source_path, replace=body.replace)}
 
     @app.patch("/v1/mcp/servers/{name}", dependencies=protected)
     def update_mcp_server(name: str, body: UpdateMcpServerRequest, core: CoreDependency) -> dict:

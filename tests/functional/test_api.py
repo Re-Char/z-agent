@@ -10,6 +10,9 @@ from zagent.bootstrap import ApplicationContainer
 from zagent.domain.errors import AgentLimitError
 
 MCP_ECHO_SERVER = Path(__file__).parents[1] / "fixtures" / "mcp_echo_server.py"
+EXAMPLE_MCP_CONFIG = (
+    Path(__file__).parents[2] / "examples" / "integrations" / "mcp-demo" / "zagent-demo-mcp.json"
+)
 
 
 def test_api_session_message_and_context_flow(tmp_path):
@@ -364,6 +367,18 @@ def test_api_real_extension_import_and_mcp_tool_call(tmp_path):
                 json={"enabled": True},
             )
             assert enabled.json()["extension"]["enabled"] is True
+
+            imported_mcp = client.post(
+                "/v1/mcp/import",
+                headers=headers,
+                json={"source_path": str(EXAMPLE_MCP_CONFIG)},
+            )
+            assert imported_mcp.status_code == 201
+            assert imported_mcp.json()["server"]["approved"] is False
+            assert imported_mcp.json()["server"]["command"] == sys.executable
+            assert client.delete(
+                "/v1/mcp/servers/zagent-demo-mcp", headers=headers
+            ).status_code == 200
 
             configured = client.post(
                 "/v1/mcp/servers",

@@ -140,6 +140,11 @@ class AddMcpServerRequest(StrictRequest):
         return self.model_dump()
 
 
+class ImportMcpServerRequest(StrictRequest):
+    source_path: str = Field(min_length=1, max_length=2000)
+    replace: bool = False
+
+
 class UpdateMcpServerRequest(StrictRequest):
     enabled: Optional[bool] = None
     approved: Optional[bool] = None

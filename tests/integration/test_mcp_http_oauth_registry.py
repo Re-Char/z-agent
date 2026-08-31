@@ -6,11 +6,14 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
+from zagent.agent.mcp_tools import MCPToolExecutor
 from zagent.domain.errors import ValidationError
 from zagent.extensions.mcp_http import MCPStreamableHTTPClient
 from zagent.extensions.oauth import MCPOAuthManager
 from zagent.extensions.registry_client import MCPRegistryClient
+from zagent.security.permissions import PermissionBroker
 from zagent.security.secrets import SecretStore
+from zagent.storage import SqliteStore
 
 
 def test_streamable_http_json_sse_session_and_bearer_headers():
@@ -153,3 +156,52 @@ def test_registry_search_detail_and_safe_remote_import():
     assert config["transport"] == "http"
     assert config["approved"] is False
     assert config["url"] == "https://mcp.example/mcp"
+
+
+def test_approved_streamable_http_tools_are_exposed_to_agent(tmp_path):
+    class ConnectedHttpManager:
+        def list_servers(self):
+            return [
+                {
+                    "name": "official-docs",
+                    "transport": "http",
+                    "enabled": True,
+                    "approved": True,
+                }
+            ]
+
+        def list_tools(self, name):
+            assert name == "official-docs"
+            return [
+                {
+                    "name": "search_docs",
+                    "description": "Search official MCP documentation",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                }
+            ]
+
+        def call_tool(self, name, tool, arguments):
+            return {
+                "content": [{"type": "text", "text": arguments["query"]}],
+                "structuredContent": {"server": name, "tool": tool},
+                "isError": False,
+            }
+
+    store = SqliteStore(str(tmp_path / "permissions"))
+    broker = PermissionBroker(store)
+    executor = MCPToolExecutor(ConnectedHttpManager(), broker)  # type: ignore[arg-type]
+    try:
+        schema = executor.schemas[0]
+        assert schema["function"]["name"] == "mcp_official-docs_search_docs"
+        arguments = {"query": "Streamable HTTP"}
+        broker.approve_inline_once(
+            None, "mcp", "official-docs", "tool:search_docs", arguments
+        )
+        result = executor.execute("", "mcp_official-docs_search_docs", arguments)
+        assert result["result"]["structuredContent"]["server"] == "official-docs"
+    finally:
+        store.close()

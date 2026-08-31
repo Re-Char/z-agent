@@ -26,7 +26,11 @@ class MCPToolExecutor:
         schemas: list[dict] = []
         dispatch: Dict[str, tuple[str, str]] = {}
         for server in self._manager.list_servers():
-            if not server["enabled"] or not server["approved"] or server["transport"] != "stdio":
+            if (
+                not server["enabled"]
+                or not server["approved"]
+                or server["transport"] == "sse"
+            ):
                 continue
             try:
                 tools = self._manager.list_tools(server["name"])

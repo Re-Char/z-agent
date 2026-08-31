@@ -1,0 +1,9 @@
+{
+  "id": "com.zagent.demo",
+  "name": "Z-Agent 中文扩展示例",
+  "version": "1.0.0",
+  "runtime": "python",
+  "entry": "extension.py",
+  "contributes": ["tools"],
+  "permissions": []
+}

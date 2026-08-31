@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "server": {
+    "name": "zagent-demo-mcp",
+    "transport": "stdio",
+    "command": "${ZAGENT_PYTHON}",
+    "args": ["./server.py"],
+    "cwd": ".",
+    "env": [],
+    "timeout_seconds": 15,
+    "sandbox": true,
+    "network": false,
+    "enabled": true,
+    "approved": false
+  }
+}
