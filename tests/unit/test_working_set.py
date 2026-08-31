@@ -9,6 +9,13 @@ def test_working_set_contains_system_and_recent_events(store, session_id, contex
     assert working.messages[-1]["content"] == "你好"
 
 
+def test_system_prompt_requires_relevant_authorized_mcp_tools(store, session_id, context):
+    prompt = context.build_working_set(session_id).messages[0]["content"]
+    assert "已授权的 MCP 与扩展工具" in prompt
+    assert "必须先调用最匹配的工具" in prompt
+    assert "不得用训练知识冒充工具结果" in prompt
+
+
 def test_working_set_excludes_raw_provider_payload(store, session_id, context):
     store.append_event(session_id, "model_raw", "system", {"choices": []})
     working = context.build_working_set(session_id)

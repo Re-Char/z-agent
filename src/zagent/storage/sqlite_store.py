@@ -18,6 +18,19 @@ from zagent.domain.models import EventRecord
 from .blob_store import BlobStore
 from .schema import MIGRATIONS_SQL, SCHEMA_SQL
 
+DEFAULT_SESSION_TITLES = {"新任务", "New task", "New Task"}
+SESSION_TITLE_MAX_CHARS = 48
+
+
+def session_title_from_message(content: str) -> str:
+    """Build a compact, single-line title from the first user message."""
+    compact = " ".join(content.split()).strip()
+    if not compact:
+        return "新任务"
+    if len(compact) <= SESSION_TITLE_MAX_CHARS:
+        return compact
+    return compact[: SESSION_TITLE_MAX_CHARS - 1].rstrip() + "…"
+
 
 def _serialized(method):
     """Serialize every operation sharing the process-wide SQLite connection."""
@@ -311,6 +324,23 @@ class SqliteStore:
             "INSERT INTO event_fts(event_id,session_id,search_text) VALUES(?,?,?)",
             (event_id, session_id, searchable_text(serialized)),
         )
+        if kind == "message" and role == "user" and isinstance(payload, str):
+            # A manually named session keeps its title. Only replace the generic
+            # placeholder, and only for the first user message in the session.
+            user_messages = self._db.execute(
+                """SELECT COUNT(*) FROM events
+                   WHERE session_id=? AND kind='message' AND role='user'""",
+                (session_id,),
+            ).fetchone()[0]
+            if user_messages == 1:
+                current_title = self._db.execute(
+                    "SELECT title FROM sessions WHERE session_id=?", (session_id,)
+                ).fetchone()[0]
+                if current_title in DEFAULT_SESSION_TITLES:
+                    self._db.execute(
+                        "UPDATE sessions SET title=? WHERE session_id=?",
+                        (session_title_from_message(payload), session_id),
+                    )
         self._db.execute("UPDATE sessions SET updated_at=? WHERE session_id=?", (now, session_id))
         return EventRecord(
             event_id=event_id,

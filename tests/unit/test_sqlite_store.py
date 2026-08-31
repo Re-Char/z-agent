@@ -21,6 +21,30 @@ def test_append_event_preserves_hash_and_sequence(store, session_id):
     assert store.get_event(first.event_id).payload == "第一条"
 
 
+def test_first_user_message_replaces_only_the_default_session_title(store):
+    session = store.create_session("新任务")
+    session_id = session["session_id"]
+    content = (
+        "  请检查   当前项目的 MCP 工具调用，并给出一个不会过度设计的最小实现方案，"
+        "标题需要保持单行且不能无限增长。  "
+    )
+
+    store.append_event(session_id, "message", "user", content)
+    title = store.get_session(session_id)["title"]
+    assert title == (
+        "请检查 当前项目的 MCP 工具调用，并给出一个不会过度设计的最小实现方案，"
+        "标题需要保持单行且…"
+    )
+    assert len(title) == 48
+
+    store.append_event(session_id, "message", "user", "第二条消息不能覆盖标题")
+    assert store.get_session(session_id)["title"] == title
+
+    named = store.create_session("用户指定标题")
+    store.append_event(named["session_id"], "message", "user", "不会覆盖")
+    assert store.get_session(named["session_id"])["title"] == "用户指定标题"
+
+
 def test_context_version_persists_and_is_visible_across_store_instances(tmp_path):
     from zagent.storage.sqlite_store import SqliteStore
 

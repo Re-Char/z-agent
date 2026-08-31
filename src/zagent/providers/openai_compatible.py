@@ -154,13 +154,19 @@ class OpenAICompatibleProvider:
         time.sleep(self._retry_backoff_seconds * (2 ** attempt))
 
     def _payload(self, messages, tools, *, stream: bool) -> Dict[str, Any]:
-        return {
+        payload = {
             "model": self._model,
             "messages": messages,
             "tools": tools,
             "temperature": self._temperature,
             "stream": stream,
         }
+        if tools:
+            # Some OpenAI-compatible gateways do not consistently infer the
+            # default once tools are present. Make native autonomous selection
+            # explicit without forcing an unrelated tool call.
+            payload["tool_choice"] = "auto"
+        return payload
 
     def _iter_sse(self, response: httpx.Response) -> Iterator[Dict[str, Any]]:
         content_parts: List[str] = []

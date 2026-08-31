@@ -11,6 +11,7 @@ def test_provider_posts_native_tools_and_parses_response():
         assert request.url.path == "/v1/chat/completions"
         assert body["model"] == "qwen-test"
         assert body["tools"][0]["function"]["name"] == "context_status"
+        assert body["tool_choice"] == "auto"
         assert request.headers["authorization"] == "Bearer key"
         return httpx.Response(200, json={"choices": [{"message": {"content": "完成"}}]})
 
@@ -24,6 +25,21 @@ def test_provider_posts_native_tools_and_parses_response():
     )
     assert response.content == "完成"
     provider.close()
+    client.close()
+
+
+def test_provider_omits_tool_choice_when_no_tools_are_available():
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = __import__("json").loads(request.content)
+        assert body["tools"] == []
+        assert "tool_choice" not in body
+        return httpx.Response(200, json={"choices": [{"message": {"content": "完成"}}]})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    provider = OpenAICompatibleProvider(
+        base_url="https://model.example/v1", model="qwen-test", client=client
+    )
+    assert provider.complete([], []).content == "完成"
     client.close()
 
 
