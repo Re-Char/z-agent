@@ -29,7 +29,7 @@ readline.createInterface({ input: process.stdin }).on("line", async (line) => {
       result = {
         protocolVersion: "2025-11-25",
         capabilities: { tools: { listChanged: false } },
-        serverInfo: { name: "zagent-node-extension-host", version: "0.2.4", pid: process.pid },
+        serverInfo: { name: "zagent-node-extension-host", version: "0.2.5", pid: process.pid },
       };
     } else if (method === "tools/list") {
       result = { tools: extension.tools };

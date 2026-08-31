@@ -3,6 +3,44 @@
 > 面向后续接手者的快速导航。基线：`eda4ff1`（"merge remote repository initialization"）。
 > 本分支相对基线已完成 v1 验收并进入 v2 首轮实施，覆盖后端核心、前端交互、上下文管理、工作区安全和真实长任务验收。
 
+## v0.2.5 发布摘要
+
+### MCP 与扩展兼容
+
+- 新增本地 MCP 配置导入 API 和 Electron 文件选择器，支持 Z-Agent schema、Claude Desktop
+  `mcpServers`、VS Code `servers`，并强制撤销外部配置携带的授权状态。
+- 新增 MCPB/DXT ZIP 安全安装器，兼容 manifest 0.1–0.4 的 Node、Python 与 Binary
+  runtime；限制文件数量和解压体积，拒绝符号链接、绝对路径和目录穿越。
+- Streamable HTTP Server 的工具现在进入 Agent 原生 tool schema，不再仅能从管理页手工连接。
+- 提供可直接导入并真实运行的 Python Extension、stdio MCP、官方 MCP 文档远程配置和
+  MCPB hello-world 示例；集成测试完成真实子进程握手、工具发现和调用。
+
+### Agent 主动工具选择
+
+- 当已授权 MCP/扩展能提供任务所需的专业、实时或权威数据时，WorkingSet 明确要求模型先调用
+  最匹配工具；不匹配的任务仍禁止为了展示能力而滥用工具。
+- OpenAI-compatible 请求在存在工具时显式发送 `tool_choice: auto`，不存在工具时保持字段缺省，
+  兼容 DeepSeek 等国产模型网关而不强制无关调用。
+- 真实 DeepSeek Electron E2E 在未指定工具名时主动选择 Ponytail 和 MCP 官方文档工具，前端完整
+  展示准备、逐次审批、执行完成和继续生成过程。
+
+### Electron 会话与审批体验
+
+- 独立 Extension Host 首次启动遇到 `host:start` 权限请求时直接弹出逐次审批框；批准后自动重试并
+  展示 Host 工具，无需用户再次点击。
+- 新对话的第一条用户输入会成为单行标题，最长 48 字并以省略号截断；前端立即更新，SQLite 后端
+  同步持久化，手动标题不会被覆盖。
+- 切换历史对话时显示独立加载页，清除上一对话残影并暂时禁用输入；请求代次保护避免快速切换时旧
+  响应覆盖当前页面。
+
+### 发布验证与边界
+
+- 完整测试：Core 206 passed / 1 skipped，Electron 7 passed，UI 24 passed，Python 覆盖率
+  82.82%；Ruff、TypeScript 和差异格式检查通过。
+- 真实 Electron E2E 验证了主动 MCP 选择、双工具逐次授权、工具进度、标题截断和历史加载页。
+- 发布仍是未签名、未公证的 macOS arm64 DMG；MCPB `uv` 自动依赖安装和 VSIX Extension Host
+  API 不在本版支持范围，不能把格式识别表述为完整兼容。
+
 ## 一分钟速览
 
 | 主题 | 状态 | 关键文件 |

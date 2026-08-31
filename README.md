@@ -1,6 +1,6 @@
 # Z-Agent
 
-Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.4` 正在开发 v2：核心自行实现模型/工具循环、无损 EventLog、中文检索、长期记忆、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
+Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.5` 正在开发 v2：核心自行实现模型/工具循环、无损 EventLog、中文检索、长期记忆、WorkingSet 投影、错误处理和终止条件，不依赖任何 Agent 框架或模型厂商托管的代码/文件工具。
 
 ## 当前能力
 
@@ -12,7 +12,7 @@ Z-Agent 是一个中文优先、可审计的本地长程智能体。当前 `0.2.
 - 受控测试 Runner：固定 Python/Node 测试模板、逐次授权、项目快照、无网络 OS 沙箱、超时和输出上限；
 - Electron + React 中文桌面 GUI，包含任务时间线和上下文检查器；
 - Z-Agent extension 目录/ZIP 安全导入、独立 Node/Python Extension Host、逐次权限审批、CycloneDX SBOM、本机安装签名与沙箱后端；
-- 受管 MCP stdio 与 Streamable HTTP：显式授权、协议握手、工具发现/调用、OAuth PKCE、官方 Registry remote 导入和原生 Agent tool-calling 接入；
+- 受管 MCP stdio 与 Streamable HTTP：显式授权、协议握手、工具发现/调用、OAuth PKCE、官方 Registry remote 导入和原生 Agent tool-calling 接入；支持安全导入 Claude Desktop、VS Code 单 Server 配置及 MCPB/DXT 0.1–0.4；
 - 单元、集成、API 功能和前端组件测试；真实 DeepSeek 长程任务验收脚本。
 
 ## 环境
