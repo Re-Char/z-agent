@@ -97,6 +97,12 @@ function formatClockTime(iso: string) {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
+function sessionTitleFromInput(content: string) {
+  const compact = content.replace(/\s+/g, " ").trim();
+  if (!compact) return "新任务";
+  return compact.length <= 48 ? compact : `${compact.slice(0, 47).trimEnd()}…`;
+}
+
 function App() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -126,6 +132,7 @@ function App() {
   const [pendingPermission, setPendingPermission] = useState<PermissionRequest>();
   const [permissionDecisionBusy, setPermissionDecisionBusy] = useState(false);
   const [notice, setNotice] = useState("");
+  const [historyLoadingId, setHistoryLoadingId] = useState<string>();
   const activeRefreshGeneration = useRef(0);
   const sessionRefreshGeneration = useRef(0);
   const workspaceLandingId = useRef<string | undefined>(undefined);
@@ -153,24 +160,43 @@ function App() {
     if (generation !== sessionRefreshGeneration.current) return;
     setSessions(response.sessions);
     if (workspaceId && workspaceLandingId.current === workspaceId) {
+      activeIdRef.current = undefined;
       setActiveId(undefined);
+      setHistoryLoadingId(undefined);
       return;
     }
-    setActiveId((current) => response.sessions.some((item) => item.session_id === current)
+    const current = activeIdRef.current;
+    const next = response.sessions.some((item) => item.session_id === current)
       ? current
-      : response.sessions[0]?.session_id);
+      : response.sessions[0]?.session_id;
+    if (next !== current) {
+      activeIdRef.current = next;
+      setHistoryLoadingId(next);
+      setActiveId(next);
+    }
   }, []);
 
   const refreshActive = useCallback(async (sessionId?: string) => {
     const generation = ++activeRefreshGeneration.current;
-    if (!sessionId) return;
-    const [eventData, contextData] = await Promise.all([
-      api<{ events: Event[] }>(`/v1/sessions/${sessionId}/events`),
-      api<ContextStatus>(`/v1/sessions/${sessionId}/context`)
-    ]);
-    if (generation !== activeRefreshGeneration.current || activeIdRef.current !== sessionId) return;
-    setEvents(eventData.events);
-    setContext(contextData);
+    if (!sessionId) {
+      setHistoryLoadingId(undefined);
+      return;
+    }
+    try {
+      const [eventData, contextData] = await Promise.all([
+        api<{ events: Event[] }>(`/v1/sessions/${sessionId}/events`),
+        api<ContextStatus>(`/v1/sessions/${sessionId}/context`)
+      ]);
+      if (generation !== activeRefreshGeneration.current || activeIdRef.current !== sessionId) return;
+      setEvents(eventData.events);
+      setContext(contextData);
+      setHistoryLoadingId((current) => current === sessionId ? undefined : current);
+    } catch (reason) {
+      if (generation === activeRefreshGeneration.current && activeIdRef.current === sessionId) {
+        setHistoryLoadingId((current) => current === sessionId ? undefined : current);
+      }
+      throw reason;
+    }
   }, []);
 
   useEffect(() => {
@@ -220,6 +246,7 @@ function App() {
       await refreshSessions(activeWorkspaceId);
       activeIdRef.current = session.session_id;
       setActiveId(session.session_id);
+      setHistoryLoadingId(undefined);
       setEvents([]);
       setContext(undefined);
     } catch (reason) {
@@ -228,10 +255,12 @@ function App() {
   }
 
   function selectSession(sessionId: string) {
+    if (sessionId === activeIdRef.current) return;
     activeRefreshGeneration.current += 1;
     workspaceLandingId.current = undefined;
     activeIdRef.current = sessionId;
     setActiveId(sessionId);
+    setHistoryLoadingId(sessionId);
     setEvents([]);
     setContext(undefined);
     setLastStats(undefined);
@@ -248,6 +277,7 @@ function App() {
     workspaceLandingId.current = workspace.workspace_id;
     setActiveWorkspaceId(workspace.workspace_id);
     setActiveId(undefined);
+    setHistoryLoadingId(undefined);
     setSessions([]);
     setEvents([]);
     setContext(undefined);
@@ -264,6 +294,7 @@ function App() {
     workspaceLandingId.current = undefined;
     setActiveWorkspaceId(workspaceId);
     setActiveId(undefined);
+    setHistoryLoadingId(undefined);
     setSessions([]);
     setEvents([]);
     setContext(undefined);
@@ -290,14 +321,22 @@ function App() {
     try {
       if (!sessionId) {
         workspaceLandingId.current = undefined;
-        const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: content.slice(0, 24), workspace_id: activeWorkspaceId } });
+        const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: sessionTitleFromInput(content), workspace_id: activeWorkspaceId } });
         sessionId = session.session_id;
         expectedContextVersion = 0;
         activeIdRef.current = sessionId;
         setActiveId(sessionId);
+        setHistoryLoadingId(undefined);
         setRunningSessionId(sessionId);
       }
       const targetSessionId = sessionId;
+      const currentSession = sessions.find((item) => item.session_id === targetSessionId);
+      if (currentSession && ["新任务", "New task", "New Task"].includes(currentSession.title)) {
+        const title = sessionTitleFromInput(content);
+        setSessions((current) => current.map((item) => item.session_id === targetSessionId
+          ? { ...item, title }
+          : item));
+      }
       // Optimistic render: show the user's message immediately after a session exists.
       const nextSequence = events.reduce((max, item) => Math.max(max, item.sequence), 0) + 1;
       optimistic = {
@@ -478,6 +517,7 @@ function App() {
   const droppedPinnedIds = new Set(context?.working_set.dropped_pinned_ids || []);
   const activeTaskRunning = busy && runningSessionId === activeId;
   const blockedByOtherTask = busy && !activeTaskRunning;
+  const historyLoading = !!activeId && historyLoadingId === activeId;
   const softRatioPct = budget > 0 && softLimit > 0 ? softLimit / budget * 100 : 0;
   const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId);
   const isToolTrace = (item: Event) => item.kind === "assistant_tool_calls" || item.role === "tool";
@@ -505,8 +545,8 @@ function App() {
       <button className="new-task" disabled={busy} onClick={createSession}>＋ 新建对话</button>
       <div className="section-label">最近任务</div>
       <nav className="session-list" aria-label="最近任务">{sessions.map((session) =>
-        <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => selectSession(session.session_id)}>
-          <span>{session.title}{busy && runningSessionId === session.session_id && <i className="session-spinner" aria-label="正在执行" />}</span><small>{busy && runningSessionId === session.session_id ? taskActivity || "正在执行任务" : `${session.event_count} 个事件 · ${formatRelativeTime(session.updated_at)}`}</small>
+        <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => selectSession(session.session_id)} title={session.title}>
+          <span><span className="session-title">{session.title}</span>{busy && runningSessionId === session.session_id && <i className="session-spinner" aria-label="正在执行" />}</span><small>{busy && runningSessionId === session.session_id ? taskActivity || "正在执行任务" : `${session.event_count} 个事件 · ${formatRelativeTime(session.updated_at)}`}</small>
         </button>)}</nav>
       <div className="sidebar-actions">
         <button disabled={!activeId} onClick={() => setMemoriesOpen(true)}>长期记忆{context?.memory_stats?.candidates ? ` · ${context.memory_stats.candidates} 待确认` : ""}</button>
@@ -541,6 +581,11 @@ function App() {
         </div>
       </header>
       <section className="timeline" ref={timelineRef} onScroll={handleTimelineScroll}>
+        {historyLoading ? <div className="history-loading" role="status" aria-live="polite">
+          <span className="history-loading-mark" aria-hidden="true" />
+          <strong>正在加载对话历史</strong>
+          <p>正在读取消息、工具记录与上下文状态…</p>
+        </div> : <>
         {!activeWorkspace?.path && <div className="workspace-notice">
           <div><strong>先连接项目目录</strong><span>设置后才能读取和修改最新代码；密钥、凭据和工作区外文件始终不可访问。</span></div>
           <button type="button" onClick={() => setWorkspaceEditOpen(true)}>设置工作区</button>
@@ -553,6 +598,7 @@ function App() {
           <Markdown text={streaming.text || "…"} />
           <span className="streaming-caret" />
         </article>}
+        </>}
       </section>
       {context?.latest_checkpoint && <div className="recovery-banner" role="status">
         <div><strong>任务已安全暂停</strong><span>{context.latest_checkpoint.reason === "max_tool_rounds" ? "已达本轮工具上限" : "已达本轮时间上限"}，进度已写入 {context.latest_checkpoint.checkpoint_id.slice(-12)}。</span></div>
@@ -561,9 +607,9 @@ function App() {
       {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="关闭错误提示">×</button></div>}
       {notice && <div className="notice-banner" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice("")} aria-label="关闭提示">×</button></div>}
       <div className="composer-dock"><form className="composer" onSubmit={send}>
-        <textarea disabled={blockedByOtherTask} value={input} onChange={(event) => setInput(event.target.value)} placeholder={blockedByOtherTask ? "另一对话正在执行任务；可点击左侧加载项返回查看" : activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-        <button type={activeTaskRunning ? "button" : "submit"} className={`send-button${activeTaskRunning ? " stop" : ""}`} disabled={blockedByOtherTask || (!activeTaskRunning && !input.trim())} aria-label={activeTaskRunning ? "停止生成" : blockedByOtherTask ? "另一对话正在执行" : "发送消息"} title={activeTaskRunning ? "停止生成" : blockedByOtherTask ? "另一对话正在执行" : "发送"} onClick={activeTaskRunning ? stopGeneration : undefined}>{activeTaskRunning ? "■" : "↑"}</button>
-      </form><small>{blockedByOtherTask ? "当前运行中的对话已在左侧标记；同一窗口暂不并发执行任务" : "Enter 发送 · Shift+Enter 换行 · 文件修改会校验最新版本"}</small></div>
+        <textarea disabled={blockedByOtherTask || historyLoading} value={input} onChange={(event) => setInput(event.target.value)} placeholder={historyLoading ? "正在加载对话历史…" : blockedByOtherTask ? "另一对话正在执行任务；可点击左侧加载项返回查看" : activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+        <button type={activeTaskRunning ? "button" : "submit"} className={`send-button${activeTaskRunning ? " stop" : ""}`} disabled={historyLoading || blockedByOtherTask || (!activeTaskRunning && !input.trim())} aria-label={activeTaskRunning ? "停止生成" : historyLoading ? "正在加载对话历史" : blockedByOtherTask ? "另一对话正在执行" : "发送消息"} title={activeTaskRunning ? "停止生成" : historyLoading ? "正在加载对话历史" : blockedByOtherTask ? "另一对话正在执行" : "发送"} onClick={activeTaskRunning ? stopGeneration : undefined}>{activeTaskRunning ? "■" : "↑"}</button>
+      </form><small>{historyLoading ? "历史记录加载完成后即可继续输入" : blockedByOtherTask ? "当前运行中的对话已在左侧标记；同一窗口暂不并发执行任务" : "Enter 发送 · Shift+Enter 换行 · 文件修改会校验最新版本"}</small></div>
     </main>
 
     {inspectorOpen && <button className="inspector-scrim" type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭上下文检查器" />}
@@ -1182,6 +1228,7 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
   onError(message: string): void;
 }) {
   const [mcpForm, setMcpForm] = useState({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false, sandbox: true, network: false, oauth: false, oauth_client_id: "", oauth_scopes: "" });
+  const [mcpImportPath, setMcpImportPath] = useState("");
   const [extForm, setExtForm] = useState({ id: "", name: "", runtime: "declarative", entry: "", contributes: ["tools"] as string[] });
   const [importPath, setImportPath] = useState("");
   const [importEnabled, setImportEnabled] = useState(false);
@@ -1189,6 +1236,7 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
   const [extensionTools, setExtensionTools] = useState<Record<string, McpTool[]>>({});
   const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
   const [permissionGrants, setPermissionGrants] = useState<PermissionGrant[]>([]);
+  const [hostPermission, setHostPermission] = useState<{ request: PermissionRequest; extension: Extension }>();
   const [registryQuery, setRegistryQuery] = useState("");
   const [registryServers, setRegistryServers] = useState<RegistryServer[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1211,6 +1259,7 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
     ]);
     setPermissionRequests(requests.requests);
     setPermissionGrants(grants.grants);
+    return requests.requests;
   }
   function fail(reason: unknown) {
     const message = friendlyError(reason);
@@ -1247,6 +1296,16 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
         approved: mcpForm.approved,
       } });
       setMcpForm({ name: "", transport: "stdio", command: "", args: "", cwd: "", env: "", url: "", enabled: true, approved: false, sandbox: true, network: false, oauth: false, oauth_client_id: "", oauth_scopes: "" });
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
+  }
+  async function importMcp(event: FormEvent) {
+    event.preventDefault();
+    setBusy(true); setError("");
+    try {
+      await api("/v1/mcp/import", { method: "POST", body: { source_path: mcpImportPath } });
+      setMcpImportPath("");
       await refresh();
     } catch (reason) { fail(reason); }
     finally { setBusy(false); }
@@ -1292,13 +1351,33 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
   async function connectExtension(extension: Extension) {
     setBusy(true); setError("");
     try {
-      await api(`/v1/extensions/${encodeURIComponent(extension.id)}/host/connect`, { method: "POST", body: {} });
-      const response = await api<{ tools: McpTool[] }>(`/v1/extensions/${encodeURIComponent(extension.id)}/host/tools`);
-      setExtensionTools((current) => ({ ...current, [extension.id]: response.tools }));
+      await finishExtensionConnection(extension);
     } catch (reason) {
-      fail(reason);
-      await refreshPermissions();
+      const requestId = permissionRequestId(reason);
+      const requests = await refreshPermissions();
+      const request = requests.find((item) => item.request_id === requestId);
+      if (request) setHostPermission({ request, extension });
+      else fail(reason);
     } finally { setBusy(false); }
+  }
+  async function finishExtensionConnection(extension: Extension) {
+    await api(`/v1/extensions/${encodeURIComponent(extension.id)}/host/connect`, { method: "POST", body: {} });
+    const response = await api<{ tools: McpTool[] }>(`/v1/extensions/${encodeURIComponent(extension.id)}/host/tools`);
+    setExtensionTools((current) => ({ ...current, [extension.id]: response.tools }));
+  }
+  async function decideHostPermission(decision: "approved" | "denied", scope: "once" | "session") {
+    if (!hostPermission || busy) return;
+    const pending = hostPermission;
+    setBusy(true); setError("");
+    try {
+      await api(`/v1/permissions/requests/${pending.request.request_id}/decision`, {
+        method: "POST", body: { decision, scope },
+      });
+      setHostPermission(undefined);
+      if (decision === "approved") await finishExtensionConnection(pending.extension);
+      await refreshPermissions();
+    } catch (reason) { fail(reason); }
+    finally { setBusy(false); }
   }
   async function decidePermission(request: PermissionRequest, decision: "approved" | "denied", scope: "once" | "session" | "always") {
     setBusy(true); setError("");
@@ -1394,6 +1473,18 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
           </div>
           {mcpTools[server.name] && <div className="integration-tools"><strong>已发现 {mcpTools[server.name].length} 个工具</strong>{mcpTools[server.name].map((tool) => <code key={tool.name}>{tool.name}</code>)}</div>}
         </div>)}</div> : <p className="muted">尚未配置 MCP server，可在下方添加。</p>}
+      <form className="settings-form" onSubmit={importMcp}>
+        <div className="settings-head"><h3>导入本地 MCP 配置</h3></div>
+        <div className="path-field"><span>配置文件</span><div className="path-row">
+          <input aria-label="MCP 配置文件" value={mcpImportPath} onChange={(event) => setMcpImportPath(event.target.value)} placeholder="选择 *.json、*.mcpb 或 *.dxt" required />
+          {window.zagent.selectMcpConfig && <button type="button" className="btn-ghost" onClick={async () => {
+            const selected = await window.zagent.selectMcpConfig!();
+            if (selected) setMcpImportPath(selected);
+          }}>选择…</button>}
+        </div></div>
+        <p className="settings-hint">支持 Z-Agent、Claude Desktop 的 mcpServers、VS Code 的 servers，以及 MCPB/DXT 0.1–0.4 的 Node/Python/Binary Bundle；包内授权状态和环境变量值不会被信任，导入后必须由你显式授权。</p>
+        <div className="form-actions"><button disabled={busy || !mcpImportPath}>安全导入 MCP</button></div>
+      </form>
       <form className="settings-form" onSubmit={addMcp}>
         <div className="settings-head"><h3>添加 MCP Server</h3></div>
         <label>名称<input value={mcpForm.name} onChange={(event) => setMcpForm({ ...mcpForm, name: event.target.value })} placeholder="例如：files" /></label>
@@ -1495,7 +1586,12 @@ function ExtensionsModal({ extensions, mcpServers, onClose, onChange, onError }:
     </section>
     {confirmDelete && <ConfirmDialog message={confirmDelete.message} confirmText="确认删除"
       onCancel={() => setConfirmDelete(null)} onConfirm={removeConfirmed} />}
-  </div></Modal>;
+  </div>{hostPermission && <PermissionDialog request={hostPermission.request} busy={busy} onDecision={decideHostPermission} />}</Modal>;
+}
+
+function permissionRequestId(reason: unknown) {
+  const text = reason instanceof Error ? reason.message : String(reason);
+  return text.match(/permission_request_id=([A-Za-z0-9_-]+)/)?.[1];
 }
 
 export default App;

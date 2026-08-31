@@ -28,6 +28,7 @@ interface ZAgentBridge {
   cancelStream?(): Promise<{ cancelled: boolean }>;
   selectFolder?(): Promise<string | null>;
   selectExtension?(): Promise<string | null>;
+  selectMcpConfig?(): Promise<string | null>;
   saveJson?(suggestedName: string, content: string): Promise<string | null>;
   oauthInfo?(): Promise<{ redirectUri: string }>;
   onCoreStatus?(callback: (status: { status: "online" | "recovering" | "offline"; attempt?: number }) => void): void;

@@ -252,8 +252,39 @@ describe("Z-Agent desktop UI", () => {
     expect((await screen.findAllByText("只属于旧会话")).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: /新会话/ }));
     expect(screen.queryAllByText("只属于旧会话")).toHaveLength(0);
+    expect(screen.getByText("正在加载对话历史")).toBeInTheDocument();
+    expect(screen.getByText("正在读取消息、工具记录与上下文状态…")).toBeInTheDocument();
+    expect(screen.queryByText("从一个清晰的目标开始")).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "任务输入" })).toBeDisabled();
     resolveSecond?.({ events: [{ event_id: "new", sequence: 1, timestamp: new Date().toISOString(), kind: "message", role: "assistant", token_estimate: 2, payload: "只属于新会话" }] });
     expect((await screen.findAllByText("只属于新会话")).length).toBeGreaterThan(0);
+    expect(screen.queryByText("正在加载对话历史")).not.toBeInTheDocument();
+  });
+
+  it("uses the first user input as a bounded session title immediately", async () => {
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "新任务", updated_at: new Date().toISOString(), event_count: 0 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [] };
+      if (path === "/v1/sessions/s1/context") return { context_version: 0, stats: { count: 0, tokens: 0 }, working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+    let finish: ((value: { type: string; result?: unknown }) => void) | undefined;
+    window.zagent.requestStream = vi.fn(() => new Promise((resolve) => { finish = resolve; })) as ZAgentBridge["requestStream"];
+
+    const content = "请检查当前项目已经连接的所有 MCP 工具，并找出最适合查询官方文档的工具后给出一个完整但不要过度设计的实现建议";
+    const expectedTitle = `${content.slice(0, 47)}…`;
+    render(<App />);
+    const input = await screen.findByRole("textbox", { name: "任务输入" });
+    await waitFor(() => expect(input).toBeEnabled());
+    fireEvent.change(input, { target: { value: content } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const title = await screen.findByText(expectedTitle, { selector: ".session-title" });
+    expect(title).toHaveTextContent(expectedTitle);
+    expect(title.closest("button.session")).toHaveAttribute("title", expectedTitle);
+    finish?.({ type: "done", result: { stats: { total_tokens: 1, completion_tokens: 1, cache_hit_tokens: 0, cache_miss_tokens: 1, cache_hit_rate: 0, elapsed_seconds: 1, tokens_per_second: 1 } } });
   });
 
   it("shows an explicit empty working-set state and closes modals with Escape", async () => {
@@ -571,45 +602,83 @@ describe("Z-Agent desktop UI", () => {
     await waitFor(() => expect(screen.getByText("尚未形成长期记忆")).toBeInTheDocument());
   });
 
-  it("imports an extension package and tests a real MCP connection from the desktop modal", async () => {
+  it("imports local Extension and MCP files and tests a real MCP connection", async () => {
     let imported = false;
+    let extensionStartApproved = false;
+    let extensionStartRequested = false;
+    let mcpImported = false;
     let approved = false;
     window.zagent.selectExtension = vi.fn(async () => "/tmp/real-extension.zip");
+    window.zagent.selectMcpConfig = vi.fn(async () => "/tmp/zagent-demo-mcp.json");
     window.zagent.request = vi.fn(async (path: string, options) => {
       if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 0 }] };
       if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
       if (path.startsWith("/v1/sessions?")) return { sessions: [] };
       if (path === "/v1/extensions" && !options?.method) return { extensions: imported ? [{
-        id: "com.example.real", name: "真实扩展", version: "2.0.0", runtime: "declarative", entry: null,
-        contributes: ["skills"], permissions: [], enabled: false, status: "installed", package_sha256: "a".repeat(64),
+        id: "com.example.real", name: "真实扩展", version: "2.0.0", runtime: "python", entry: "extension.py",
+        contributes: ["tools"], permissions: [], enabled: true, status: "installed", package_sha256: "a".repeat(64),
       }] : [] };
       if (path === "/v1/extensions/import" && options?.method === "POST") {
-        expect(options.body).toEqual({ source_path: "/tmp/real-extension.zip", enabled: false });
+        expect(options.body).toEqual({ source_path: "/tmp/real-extension.zip", enabled: true });
         imported = true;
         return { extension: {} };
       }
-      if (path === "/v1/mcp/servers" && !options?.method) return { servers: [{
+      if (path === "/v1/extensions/com.example.real/host/connect" && options?.method === "POST") {
+        if (!extensionStartApproved) {
+          extensionStartRequested = true;
+          throw new Error("操作需要用户授权；permission_request_id=prm_host");
+        }
+        return { connected: true };
+      }
+      if (path === "/v1/extensions/com.example.real/host/tools") return { tools: [{ name: "hello", inputSchema: { type: "object" } }] };
+      if (path === "/v1/mcp/servers" && !options?.method) return { servers: mcpImported ? [{
         name: "echo", transport: "stdio", enabled: true, approved, command: "python", args: ["server.py"],
         status: approved ? "connected" : "approval_required",
-      }] };
+      }] : [] };
+      if (path === "/v1/mcp/import" && options?.method === "POST") {
+        expect(options.body).toEqual({ source_path: "/tmp/zagent-demo-mcp.json" });
+        mcpImported = true;
+        return { server: { approved: false } };
+      }
       if (path === "/v1/mcp/servers/echo" && options?.method === "PATCH") {
         approved = true;
         return { server: {} };
       }
       if (path === "/v1/mcp/servers/echo/connect" && options?.method === "POST") return { connected: true };
       if (path === "/v1/mcp/servers/echo/tools") return { tools: [{ name: "echo", description: "Echo", inputSchema: { type: "object" } }] };
-      if (path === "/v1/permissions/requests?status=pending") return { requests: [] };
+      if (path === "/v1/permissions/requests?status=pending") return { requests: extensionStartRequested && !extensionStartApproved ? [{
+        request_id: "prm_host", subject_type: "extension", subject_id: "com.example.real", action: "host:start",
+        details: { network: false }, status: "pending", created_at: new Date().toISOString(),
+      }] : [] };
+      if (path === "/v1/permissions/requests/prm_host/decision" && options?.method === "POST") {
+        expect(options.body).toEqual({ decision: "approved", scope: "once" });
+        extensionStartApproved = true;
+        return { request: { status: "approved" } };
+      }
       if (path === "/v1/permissions/grants") return { grants: [] };
       throw new Error(`unexpected path: ${path}`);
     }) as ZAgentBridge["request"];
 
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "扩展与 MCP" }));
-    fireEvent.click(await screen.findByRole("button", { name: "选择…" }));
+    const mcpConfigInput = await screen.findByLabelText("MCP 配置文件");
+    fireEvent.click(mcpConfigInput.parentElement!.querySelector("button")!);
+    await waitFor(() => expect(screen.getByLabelText("MCP 配置文件")).toHaveValue("/tmp/zagent-demo-mcp.json"));
+    fireEvent.click(screen.getByRole("button", { name: "安全导入 MCP" }));
+    await waitFor(() => expect(screen.getByText("echo", { selector: "strong" })).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText("扩展根目录或 ZIP").parentElement!.querySelector("button")!);
     await waitFor(() => expect(screen.getByLabelText("扩展根目录或 ZIP")).toHaveValue("/tmp/real-extension.zip"));
+    fireEvent.click(screen.getByLabelText("导入后启用 manifest（可执行扩展仍不会在主进程直接运行）"));
     fireEvent.click(screen.getByRole("button", { name: "安全导入" }));
     await waitFor(() => expect(screen.getByText("真实扩展")).toBeInTheDocument());
     expect(screen.getByText(/SHA aaaaaaaaaaaa/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "启动独立 Host" }));
+    expect(await screen.findByRole("alertdialog", { name: "需要批准" })).toHaveTextContent("调用扩展 com.example.real");
+    fireEvent.click(screen.getByRole("button", { name: "仅此一次" }));
+    await waitFor(() => expect(screen.getByText("Host 提供 1 个工具")).toBeInTheDocument());
+    expect(screen.getByText("hello", { selector: "code" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "连接并读取工具" }));
     await waitFor(() => expect(screen.getByText("已发现 1 个工具")).toBeInTheDocument());

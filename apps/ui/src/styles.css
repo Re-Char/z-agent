@@ -145,6 +145,13 @@ select:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.session-title {
+  min-width: 0;
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .session-spinner {
   width: 11px;
   height: 11px;
@@ -325,6 +332,25 @@ select:focus-visible {
 .empty-chips { display: flex; flex-wrap: wrap; justify-content: center; gap: 0; margin-top: 18px; }
 .empty-chips span { color: var(--subtle); font-size: var(--font-caption); }
 .empty-chips span + span::before { content: "·"; margin: 0 8px; color: var(--border-strong); }
+.history-loading {
+  min-height: 360px;
+  flex: 1;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  text-align: center;
+}
+.history-loading-mark {
+  width: 24px;
+  height: 24px;
+  margin-bottom: 16px;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+.history-loading strong { color: var(--text); font-size: var(--font-body); font-weight: 600; }
+.history-loading p { margin: 7px 0 0; color: var(--subtle); font-size: var(--font-caption); }
 
 .event { width: min(100%, var(--content-width)); margin: 0 0 28px; }
 .event.user {

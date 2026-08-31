@@ -351,6 +351,20 @@ ipcMain.handle("dialog:select-extension", async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("dialog:select-mcp-config", async () => {
+  if (!mainWindow) return null;
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "选择 MCP 配置或 MCP Bundle",
+    properties: ["openFile"],
+    filters: [
+      { name: "MCP Config / Bundle", extensions: ["json", "mcpb", "dxt"] },
+      { name: "All Files", extensions: ["*"] }
+    ]
+  });
+  if (result.canceled || !result.filePaths.length) return null;
+  return result.filePaths[0];
+});
+
 ipcMain.handle("dialog:save-json", async (_event, request) => {
   if (!mainWindow) return null;
   const { content, safeName } = prepareJsonExport(request);
