@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import secrets
 import socket
@@ -35,7 +36,8 @@ def main(argv: Optional[list[str]] = None) -> None:
     try:
         # Electron reads this protocol line before making authenticated requests.
         print(json.dumps({"ready": True, "host": args.host, "port": port, "token": token}), flush=True)
-        server.run()
+        with contextlib.suppress(KeyboardInterrupt):
+            server.run()
     finally:
         container.close()
 

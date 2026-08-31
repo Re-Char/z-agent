@@ -21,6 +21,7 @@ from .schema import MIGRATIONS_SQL, SCHEMA_SQL
 
 def _serialized(method):
     """Serialize every operation sharing the process-wide SQLite connection."""
+
     @wraps(method)
     def wrapped(self, *args, **kwargs):
         with self._lock:
@@ -50,14 +51,13 @@ class SqliteStore:
                 with contextlib.suppress(sqlite3.OperationalError):
                     self._db.execute(statement)
             self._ensure_search_index_version()
+            self._ensure_memory_search_index_version()
         self._ensure_default_workspace()
 
     def _ensure_search_index_version(self) -> None:
         """Rebuild FTS when Chinese normalization/token rules change."""
         index_version = 2
-        row = self._db.execute(
-            "SELECT value FROM metadata WHERE key='event_index_version'"
-        ).fetchone()
+        row = self._db.execute("SELECT value FROM metadata WHERE key='event_index_version'").fetchone()
         if row is not None and int(row["value"]) == index_version:
             return
         self._db.execute("DELETE FROM event_fts")
@@ -78,10 +78,34 @@ class SqliteStore:
             (index_version,),
         )
 
+    def _ensure_memory_search_index_version(self) -> None:
+        """Rebuild persisted sparse terms when deterministic weights change."""
+        index_version = 2
+        row = self._db.execute("SELECT value FROM metadata WHERE key='memory_index_version'").fetchone()
+        if row is not None and int(row["value"]) == index_version:
+            return
+        # Local import avoids a module-level cycle: retrieval's event search
+        # depends on SqliteStore, while this migration only needs sparse_terms.
+        from zagent.context.retrieval import sparse_terms
+
+        self._db.execute("DELETE FROM memory_terms")
+        rows = self._db.execute(
+            """SELECT memory_id,memory_key,content FROM memories
+               WHERE status IN ('active','candidate') AND content<>''"""
+        ).fetchall()
+        for item in rows:
+            terms = sparse_terms(f"{item['memory_key']} {item['content']}")
+            self._db.executemany(
+                "INSERT INTO memory_terms(memory_id,term,weight) VALUES(?,?,?)",
+                [(item["memory_id"], term, weight) for term, weight in terms.items()],
+            )
+        self._db.execute(
+            "INSERT OR REPLACE INTO metadata(key,value) VALUES('memory_index_version',?)",
+            (index_version,),
+        )
+
     def _ensure_default_workspace(self) -> None:
-        row = self._db.execute(
-            "SELECT workspace_id FROM workspaces ORDER BY created_at LIMIT 1"
-        ).fetchone()
+        row = self._db.execute("SELECT workspace_id FROM workspaces ORDER BY created_at LIMIT 1").fetchone()
         if row is None:
             self.create_workspace("默认工作区", "")
 
@@ -110,9 +134,7 @@ class SqliteStore:
 
     @_serialized
     def get_workspace(self, workspace_id: str) -> Dict[str, Any]:
-        row = self._db.execute(
-            "SELECT * FROM workspaces WHERE workspace_id=?", (workspace_id,)
-        ).fetchone()
+        row = self._db.execute("SELECT * FROM workspaces WHERE workspace_id=?", (workspace_id,)).fetchone()
         if row is None:
             raise NotFoundError("workspace not found")
         result = dict(row)
@@ -159,9 +181,7 @@ class SqliteStore:
 
     @_serialized
     def default_workspace_id(self) -> str:
-        row = self._db.execute(
-            "SELECT workspace_id FROM workspaces ORDER BY created_at LIMIT 1"
-        ).fetchone()
+        row = self._db.execute("SELECT workspace_id FROM workspaces ORDER BY created_at LIMIT 1").fetchone()
         return row["workspace_id"] if row else self.create_workspace("默认工作区", "")["workspace_id"]
 
     @_serialized
@@ -225,9 +245,16 @@ class SqliteStore:
             if expected_context_version is not None:
                 self._claim_context_version(session_id, expected_context_version)
             event = self._insert_event(
-                session_id, kind, role, payload,
-                parent_event_id=parent_event_id, tool_name=tool_name, tool_call_id=tool_call_id,
-                tags=tags, sensitivity=sensitivity, provenance=provenance,
+                session_id,
+                kind,
+                role,
+                payload,
+                parent_event_id=parent_event_id,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tags=tags,
+                sensitivity=sensitivity,
+                provenance=provenance,
             )
             if expected_context_version is None:
                 self._bump_context_version(session_id)
@@ -261,9 +288,24 @@ class SqliteStore:
             """INSERT INTO events(event_id,session_id,sequence,timestamp,kind,role,payload_inline,
                payload_ref,payload_sha256,token_estimate,parent_event_id,tool_name,tool_call_id,tags,
                sensitivity,provenance) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (event_id, session_id, sequence, now, kind, role, inline, reference, digest,
-             estimate_tokens(serialized), parent_event_id, tool_name, tool_call_id,
-             json.dumps(list(tags or []), ensure_ascii=False), sensitivity, provenance),
+            (
+                event_id,
+                session_id,
+                sequence,
+                now,
+                kind,
+                role,
+                inline,
+                reference,
+                digest,
+                estimate_tokens(serialized),
+                parent_event_id,
+                tool_name,
+                tool_call_id,
+                json.dumps(list(tags or []), ensure_ascii=False),
+                sensitivity,
+                provenance,
+            ),
         )
         self._db.execute(
             "INSERT INTO event_fts(event_id,session_id,search_text) VALUES(?,?,?)",
@@ -271,11 +313,21 @@ class SqliteStore:
         )
         self._db.execute("UPDATE sessions SET updated_at=? WHERE session_id=?", (now, session_id))
         return EventRecord(
-            event_id=event_id, session_id=session_id, sequence=sequence, timestamp=now,
-            kind=kind, role=role, payload=payload, payload_sha256=digest,
-            token_estimate=estimate_tokens(serialized), parent_event_id=parent_event_id,
-            tool_name=tool_name, tool_call_id=tool_call_id,
-            tags=list(tags or []), sensitivity=sensitivity, provenance=provenance,
+            event_id=event_id,
+            session_id=session_id,
+            sequence=sequence,
+            timestamp=now,
+            kind=kind,
+            role=role,
+            payload=payload,
+            payload_sha256=digest,
+            token_estimate=estimate_tokens(serialized),
+            parent_event_id=parent_event_id,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tags=list(tags or []),
+            sensitivity=sensitivity,
+            provenance=provenance,
         )
 
     def _bump_context_version(self, session_id: str) -> None:
@@ -296,16 +348,12 @@ class SqliteStore:
         )
         if cursor.rowcount == 1:
             return
-        if self._db.execute(
-            "SELECT 1 FROM sessions WHERE session_id=?", (session_id,)
-        ).fetchone() is None:
+        if self._db.execute("SELECT 1 FROM sessions WHERE session_id=?", (session_id,)).fetchone() is None:
             raise NotFoundError("session not found")
         current = self._db.execute(
             "SELECT context_version FROM sessions WHERE session_id=?", (session_id,)
         ).fetchone()[0]
-        raise ConcurrentUpdateError(
-            f"会话已被其他进程更新：expected={expected}, current={current}"
-        )
+        raise ConcurrentUpdateError(f"会话已被其他进程更新：expected={expected}, current={current}")
 
     @_serialized
     def context_version(self, session_id: str) -> int:
@@ -337,9 +385,7 @@ class SqliteStore:
     ) -> Dict[str, Any]:
         """Claim a durable tool invocation or return a safe replay/block decision."""
         self.get_session(session_id)
-        canonical = json.dumps(
-            arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        canonical = json.dumps(arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         arguments_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         with self._db:
             cursor = self._db.execute(
@@ -427,12 +473,21 @@ class SqliteStore:
 
     def _to_event(self, row: sqlite3.Row) -> EventRecord:
         return EventRecord(
-            event_id=row["event_id"], session_id=row["session_id"], sequence=row["sequence"],
-            timestamp=row["timestamp"], kind=row["kind"], role=row["role"],
-            payload=self._deserialize_payload(row), payload_sha256=row["payload_sha256"],
-            token_estimate=row["token_estimate"], parent_event_id=row["parent_event_id"],
-            tool_name=row["tool_name"], tool_call_id=row["tool_call_id"],
-            tags=json.loads(row["tags"]), sensitivity=row["sensitivity"], provenance=row["provenance"],
+            event_id=row["event_id"],
+            session_id=row["session_id"],
+            sequence=row["sequence"],
+            timestamp=row["timestamp"],
+            kind=row["kind"],
+            role=row["role"],
+            payload=self._deserialize_payload(row),
+            payload_sha256=row["payload_sha256"],
+            token_estimate=row["token_estimate"],
+            parent_event_id=row["parent_event_id"],
+            tool_name=row["tool_name"],
+            tool_call_id=row["tool_call_id"],
+            tags=json.loads(row["tags"]),
+            sensitivity=row["sensitivity"],
+            provenance=row["provenance"],
         )
 
     @_serialized
@@ -525,11 +580,13 @@ class SqliteStore:
             weak_hits = sum(1 for term in weak if term in serialized)
             # Lower score = better (bm25 returns negative values in FTS5).
             score = float(row["score"]) - phrase_hit * 50.0 - strong_hits * 5.0 - weak_hits * 1.0
-            weighted.append({
-                "event": event.to_dict(),
-                "excerpt": excerpt(self._serialize(event.payload)),
-                "score": round(score, 2),
-            })
+            weighted.append(
+                {
+                    "event": event.to_dict(),
+                    "excerpt": excerpt(self._serialize(event.payload)),
+                    "score": round(score, 2),
+                }
+            )
         return sorted(weighted, key=lambda item: item["score"])[:limit]
 
     @_serialized
@@ -569,9 +626,7 @@ class SqliteStore:
 
     @_serialized
     def pinned_event_ids(self, session_id: str) -> set[str]:
-        rows = self._db.execute(
-            "SELECT event_id FROM pins WHERE session_id=?", (session_id,)
-        ).fetchall()
+        rows = self._db.execute("SELECT event_id FROM pins WHERE session_id=?", (session_id,)).fetchall()
         return {row["event_id"] for row in rows}
 
     @_serialized
@@ -626,20 +681,30 @@ class SqliteStore:
         # a failure halfway would otherwise leave an orphan archive event whose
         # latest_archive no longer matches the event stream.
         with self._lock, self._db:
-            summary_event = self._insert_event(
-                session_id, "archive", "system", summary, tags=["archive"]
-            )
+            summary_event = self._insert_event(session_id, "archive", "system", summary, tags=["archive"])
             self._db.execute(
                 """INSERT INTO archives(
                        archive_id,session_id,start_sequence,end_sequence,
                        summary_event_id,reason,state_json,created_at
                    ) VALUES(?,?,?,?,?,?,?,?)""",
-                (archive_id, session_id, start_sequence, end_sequence, summary_event.event_id, reason,
-                 json.dumps(state, ensure_ascii=False), self._now()),
+                (
+                    archive_id,
+                    session_id,
+                    start_sequence,
+                    end_sequence,
+                    summary_event.event_id,
+                    reason,
+                    json.dumps(state, ensure_ascii=False),
+                    self._now(),
+                ),
             )
             self._bump_context_version(session_id)
-        return {"archive_id": archive_id, "summary_event_id": summary_event.event_id,
-                "event_range": [start_sequence, end_sequence], "state": state}
+        return {
+            "archive_id": archive_id,
+            "summary_event_id": summary_event.event_id,
+            "event_range": [start_sequence, end_sequence],
+            "state": state,
+        }
 
     @_serialized
     def latest_archive(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -710,14 +775,11 @@ class SqliteStore:
         }
 
     @_serialized
-    def latest_checkpoint(
-        self, session_id: str, *, active_only: bool = False
-    ) -> Optional[Dict[str, Any]]:
+    def latest_checkpoint(self, session_id: str, *, active_only: bool = False) -> Optional[Dict[str, Any]]:
         self.get_session(session_id)
         condition = " AND resolved_at IS NULL" if active_only else ""
         row = self._db.execute(
-            f"SELECT * FROM checkpoints WHERE session_id=?{condition} "
-            "ORDER BY created_at DESC LIMIT 1",
+            f"SELECT * FROM checkpoints WHERE session_id=?{condition} ORDER BY created_at DESC LIMIT 1",
             (session_id,),
         ).fetchone()
         if row is None:
@@ -777,9 +839,7 @@ class SqliteStore:
 
     @_serialized
     def memory_version(self) -> int:
-        row = self._db.execute(
-            "SELECT value FROM metadata WHERE key='memory_version'"
-        ).fetchone()
+        row = self._db.execute("SELECT value FROM metadata WHERE key='memory_version'").fetchone()
         return int(row["value"] if row else 0)
 
     @staticmethod
@@ -790,9 +850,7 @@ class SqliteStore:
 
     @_serialized
     def get_memory(self, memory_id: str) -> Dict[str, Any]:
-        row = self._db.execute(
-            "SELECT * FROM memories WHERE memory_id=?", (memory_id,)
-        ).fetchone()
+        row = self._db.execute("SELECT * FROM memories WHERE memory_id=?", (memory_id,)).fetchone()
         if row is None:
             raise NotFoundError("memory not found")
         result = self._memory_row(row)
@@ -825,7 +883,7 @@ class SqliteStore:
         memory_key: str,
         content: str,
         confidence: float,
-        status: str,
+        confirmed: bool,
         pinned: bool,
         created_reason: str,
         source_session_id: str,
@@ -834,12 +892,45 @@ class SqliteStore:
         terms: Dict[str, float],
     ) -> Dict[str, Any]:
         self.get_session(source_session_id)
-        if status not in {"candidate", "active"}:
-            raise ValidationError("invalid initial memory status")
         memory_id = "mem_" + uuid.uuid4().hex
         now = self._now()
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        with self._db:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            active_row = self._db.execute(
+                """SELECT memory_id FROM memories
+                   WHERE scope_type=? AND scope_id=? AND memory_type=? AND memory_key=?
+                     AND status='active' LIMIT 1""",
+                (scope_type, scope_id, memory_type, memory_key),
+            ).fetchone()
+            existing = self.get_memory(active_row["memory_id"]) if active_row else None
+            if existing and existing["content_sha256"] == digest:
+                self._reinforce_memory_in_transaction(existing, source_event_ids, confidence, now)
+                self._db.commit()
+                return {
+                    "memory": self.get_memory(existing["memory_id"]),
+                    "outcome": "already_active",
+                    "conflict_memory_id": None,
+                }
+
+            candidate_row = self._db.execute(
+                """SELECT memory_id FROM memories
+                   WHERE scope_type=? AND scope_id=? AND memory_type=? AND memory_key=?
+                     AND content_sha256=? AND status='candidate'
+                   ORDER BY created_at DESC LIMIT 1""",
+                (scope_type, scope_id, memory_type, memory_key, digest),
+            ).fetchone()
+            if candidate_row:
+                candidate = self.get_memory(candidate_row["memory_id"])
+                self._reinforce_memory_in_transaction(candidate, source_event_ids, confidence, now)
+                self._db.commit()
+                return {
+                    "memory": self.get_memory(candidate["memory_id"]),
+                    "outcome": "already_candidate",
+                    "conflict_memory_id": existing["memory_id"] if existing else None,
+                }
+
+            status = "active" if confirmed and existing is None else "candidate"
             self._db.execute(
                 """INSERT INTO memories(
                        memory_id,scope_type,scope_id,memory_type,memory_key,content,
@@ -848,9 +939,22 @@ class SqliteStore:
                        last_verified_at,expires_at
                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)""",
                 (
-                    memory_id, scope_type, scope_id, memory_type, memory_key, content,
-                    digest, confidence, status, int(pinned), created_reason,
-                    source_session_id, now, now, now, expires_at,
+                    memory_id,
+                    scope_type,
+                    scope_id,
+                    memory_type,
+                    memory_key,
+                    content,
+                    digest,
+                    confidence,
+                    status,
+                    int(pinned),
+                    created_reason,
+                    source_session_id,
+                    now,
+                    now,
+                    now,
+                    expires_at,
                 ),
             )
             self._db.executemany(
@@ -868,54 +972,73 @@ class SqliteStore:
                 )
             self._insert_memory_audit(memory_id, "created", digest, {"status": status})
             self._bump_memory_version()
-        return self.get_memory(memory_id)
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
+        return {
+            "memory": self.get_memory(memory_id),
+            "outcome": "active" if status == "active" else "candidate",
+            "conflict_memory_id": existing["memory_id"] if existing else None,
+        }
 
-    @_serialized
-    def reinforce_memory(
-        self, memory_id: str, source_event_ids: Sequence[str], confidence: float
-    ) -> Dict[str, Any]:
-        memory = self.get_memory(memory_id)
-        if memory["status"] != "active":
-            raise ValidationError("only active memory can be reinforced")
-        now = self._now()
-        with self._db:
-            self._db.executemany(
-                "INSERT OR IGNORE INTO memory_sources(memory_id,event_id) VALUES(?,?)",
-                [(memory_id, event_id) for event_id in source_event_ids],
-            )
-            self._db.execute(
-                """UPDATE memories SET confidence=MAX(confidence,?),updated_at=?,
-                   last_verified_at=? WHERE memory_id=?""",
-                (confidence, now, now, memory_id),
-            )
-            self._insert_memory_audit(
-                memory_id,
-                "reinforced",
-                memory["content_sha256"],
-                {"source_event_ids": list(source_event_ids)},
-            )
-            self._bump_memory_version()
-        return self.get_memory(memory_id)
+    def _reinforce_memory_in_transaction(
+        self,
+        memory: Dict[str, Any],
+        source_event_ids: Sequence[str],
+        confidence: float,
+        now: str,
+    ) -> None:
+        self._db.executemany(
+            "INSERT OR IGNORE INTO memory_sources(memory_id,event_id) VALUES(?,?)",
+            [(memory["memory_id"], event_id) for event_id in source_event_ids],
+        )
+        self._db.execute(
+            """UPDATE memories SET confidence=MAX(confidence,?),updated_at=?,
+               last_verified_at=? WHERE memory_id=?""",
+            (confidence, now, now, memory["memory_id"]),
+        )
+        self._insert_memory_audit(
+            memory["memory_id"],
+            "reinforced",
+            memory["content_sha256"],
+            {"source_event_ids": list(source_event_ids)},
+        )
+        self._bump_memory_version()
 
     @_serialized
     def activate_memory(
         self, memory_id: str, *, supersedes_memory_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        memory = self.get_memory(memory_id)
-        if memory["status"] not in {"candidate", "active"}:
-            raise ValidationError("only a candidate memory can be activated")
-        now = self._now()
-        with self._db:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            memory = self.get_memory(memory_id)
+            if memory["status"] == "active":
+                if memory.get("supersedes_memory_id") == supersedes_memory_id:
+                    self._db.commit()
+                    return memory
+                raise ConcurrentUpdateError("memory was already activated by another request")
+            if memory["status"] != "candidate":
+                raise ValidationError("only a candidate memory can be activated")
+            now = self._now()
             if supersedes_memory_id:
                 previous = self.get_memory(supersedes_memory_id)
                 if (
-                    previous["scope_type"], previous["scope_id"], previous["memory_type"],
+                    previous["scope_type"],
+                    previous["scope_id"],
+                    previous["memory_type"],
                     previous["memory_key"],
                 ) != (
-                    memory["scope_type"], memory["scope_id"], memory["memory_type"],
+                    memory["scope_type"],
+                    memory["scope_id"],
+                    memory["memory_type"],
                     memory["memory_key"],
                 ):
                     raise ValidationError("superseded memory has a different identity")
+                if previous["status"] != "active":
+                    raise ConcurrentUpdateError(
+                        "superseded memory is no longer active; refresh candidates before confirming"
+                    )
                 self._db.execute(
                     "UPDATE memories SET status='superseded',updated_at=? WHERE memory_id=?",
                     (now, supersedes_memory_id),
@@ -923,7 +1046,9 @@ class SqliteStore:
                 self._db.execute("DELETE FROM memory_fts WHERE memory_id=?", (supersedes_memory_id,))
             else:
                 existing = self.find_active_memory(
-                    memory["scope_type"], memory["scope_id"], memory["memory_type"],
+                    memory["scope_type"],
+                    memory["scope_id"],
+                    memory["memory_type"],
                     memory["memory_key"],
                 )
                 if existing is not None and existing["memory_id"] != memory_id:
@@ -939,24 +1064,34 @@ class SqliteStore:
             self._db.execute(
                 "INSERT INTO memory_fts(memory_id,scope_type,scope_id,search_text) VALUES(?,?,?,?)",
                 (
-                    memory_id, memory["scope_type"], memory["scope_id"],
+                    memory_id,
+                    memory["scope_type"],
+                    memory["scope_id"],
                     searchable_text(f"{memory['memory_key']} {memory['content']}"),
                 ),
             )
             self._insert_memory_audit(
-                memory_id, "activated", memory["content_sha256"],
+                memory_id,
+                "activated",
+                memory["content_sha256"],
                 {"supersedes_memory_id": supersedes_memory_id},
             )
             self._bump_memory_version()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
         return self.get_memory(memory_id)
 
     @_serialized
     def forget_memory(self, memory_id: str, reason: str) -> Dict[str, Any]:
-        memory = self.get_memory(memory_id)
-        if memory["status"] == "deleted":
-            return memory
-        now = self._now()
-        with self._db:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            memory = self.get_memory(memory_id)
+            if memory["status"] == "deleted":
+                self._db.commit()
+                return memory
+            now = self._now()
             self._db.execute(
                 """UPDATE memories SET content='',status='deleted',pinned=0,
                    updated_at=? WHERE memory_id=?""",
@@ -964,10 +1099,48 @@ class SqliteStore:
             )
             self._db.execute("DELETE FROM memory_fts WHERE memory_id=?", (memory_id,))
             self._db.execute("DELETE FROM memory_terms WHERE memory_id=?", (memory_id,))
+            self._insert_memory_audit(memory_id, "deleted", memory["content_sha256"], {"reason": reason})
+            self._bump_memory_version()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
+        return self.get_memory(memory_id)
+
+    @_serialized
+    def set_memory_pinned(
+        self,
+        memory_id: str,
+        pinned: bool,
+        *,
+        expected_pinned: bool,
+    ) -> Dict[str, Any]:
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            memory = self.get_memory(memory_id)
+            if memory["status"] != "active":
+                raise ValidationError("only active memory can be pinned")
+            if memory["pinned"] == pinned:
+                self._db.commit()
+                return memory
+            if memory["pinned"] != expected_pinned:
+                raise ConcurrentUpdateError("memory pin state changed; refresh memories before updating")
+            now = self._now()
+            self._db.execute(
+                "UPDATE memories SET pinned=?,updated_at=? WHERE memory_id=?",
+                (int(pinned), now, memory_id),
+            )
             self._insert_memory_audit(
-                memory_id, "deleted", memory["content_sha256"], {"reason": reason}
+                memory_id,
+                "pinned" if pinned else "unpinned",
+                memory["content_sha256"],
+                {"expected_pinned": expected_pinned},
             )
             self._bump_memory_version()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
         return self.get_memory(memory_id)
 
     @_serialized
@@ -998,6 +1171,52 @@ class SqliteStore:
         return [self.get_memory(row["memory_id"]) for row in rows]
 
     @_serialized
+    def expire_memories(self, scope_pairs: Sequence[tuple[str, str]]) -> int:
+        if not scope_pairs:
+            return 0
+        scope_sql = " OR ".join("(scope_type=? AND scope_id=?)" for _ in scope_pairs)
+        params: list[Any] = [value for pair in scope_pairs for value in pair]
+        now = self._now()
+        params.append(now)
+        self._db.execute("BEGIN IMMEDIATE")
+        try:
+            # The selection must happen after obtaining the write lock.  Two
+            # Core processes may notice the same deadline concurrently; only
+            # the first one is allowed to transition and audit the rows.
+            rows = self._db.execute(
+                f"""SELECT memory_id,content_sha256 FROM memories WHERE ({scope_sql})
+                     AND status IN ('active','candidate') AND expires_at IS NOT NULL
+                     AND expires_at<=?""",
+                params,
+            ).fetchall()
+            if not rows:
+                self._db.commit()
+                return 0
+            memory_ids = [row["memory_id"] for row in rows]
+            self._db.executemany(
+                "UPDATE memories SET status='expired',pinned=0,updated_at=? WHERE memory_id=?",
+                [(now, memory_id) for memory_id in memory_ids],
+            )
+            self._db.executemany(
+                "DELETE FROM memory_fts WHERE memory_id=?",
+                [(memory_id,) for memory_id in memory_ids],
+            )
+            self._db.executemany(
+                "DELETE FROM memory_terms WHERE memory_id=?",
+                [(memory_id,) for memory_id in memory_ids],
+            )
+            for row in rows:
+                self._insert_memory_audit(
+                    row["memory_id"], "expired", row["content_sha256"], {"expired_at": now}
+                )
+            self._bump_memory_version()
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            raise
+        return len(memory_ids)
+
+    @_serialized
     def search_memory_lexical(
         self, scope_pairs: Sequence[tuple[str, str]], query: str, limit: int
     ) -> List[Dict[str, Any]]:
@@ -1018,10 +1237,7 @@ class SqliteStore:
                  ORDER BY score LIMIT ?""",
             [*params[:-1], self._now(), params[-1]],
         ).fetchall()
-        return [
-            {"memory": self.get_memory(row["memory_id"]), "score": float(row["score"])}
-            for row in rows
-        ]
+        return [{"memory": self.get_memory(row["memory_id"]), "score": float(row["score"])} for row in rows]
 
     @_serialized
     def search_memory_terms(
@@ -1046,13 +1262,24 @@ class SqliteStore:
             params,
         ).fetchall()
         scores: Dict[str, float] = {}
+        matched: Dict[str, set[str]] = {}
         for row in rows:
             scores[row["memory_id"]] = scores.get(row["memory_id"], 0.0) + (
                 float(row["weight"]) * float(query_terms[row["term"]])
             )
+            matched.setdefault(row["memory_id"], set()).add(row["term"])
+        query_weight = sum(abs(float(weight)) for weight in query_terms.values()) or 1.0
         ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))[:limit]
         return [
-            {"memory": self.get_memory(memory_id), "score": round(score, 6)}
+            {
+                "memory": self.get_memory(memory_id),
+                "score": round(score, 6),
+                "query_coverage": round(
+                    sum(abs(float(query_terms[term])) for term in matched[memory_id]) / query_weight,
+                    4,
+                ),
+                "matched_terms": sorted(matched[memory_id])[:24],
+            }
             for memory_id, score in ranked
         ]
 
@@ -1064,10 +1291,29 @@ class SqliteStore:
                    audit_id,memory_id,action,content_sha256,details_json,created_at
                ) VALUES(?,?,?,?,?,?)""",
             (
-                "maud_" + uuid.uuid4().hex, memory_id, action, content_sha256,
-                json.dumps(details, ensure_ascii=False), self._now(),
+                "maud_" + uuid.uuid4().hex,
+                memory_id,
+                action,
+                content_sha256,
+                json.dumps(details, ensure_ascii=False),
+                self._now(),
             ),
         )
+
+    @_serialized
+    def list_memory_audit(self, memory_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        self.get_memory(memory_id)
+        rows = self._db.execute(
+            """SELECT audit_id,memory_id,action,content_sha256,details_json,created_at
+               FROM memory_audit WHERE memory_id=? ORDER BY created_at DESC LIMIT ?""",
+            (memory_id, max(1, min(limit, 500))),
+        ).fetchall()
+        audit = []
+        for row in rows:
+            item = dict(row)
+            item["details"] = json.loads(item.pop("details_json"))
+            audit.append(item)
+        return audit
 
     # --- permission broker -------------------------------------------------
 
@@ -1139,9 +1385,7 @@ class SqliteStore:
                 (status,),
             ).fetchall()
         else:
-            rows = self._db.execute(
-                "SELECT * FROM permission_requests ORDER BY created_at DESC"
-            ).fetchall()
+            rows = self._db.execute("SELECT * FROM permission_requests ORDER BY created_at DESC").fetchall()
         return [self._permission_request(row) for row in rows]
 
     @_serialized

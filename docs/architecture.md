@@ -18,11 +18,11 @@
 - **最小工作视图**：Prompt 只载入当前任务所需的工作集；大工具输出和历史轨迹保留在环境中。
 - **零训练运行时**：所有能力通过本地上下文算法、显式工具协议和模型原生 tool calling 实现，不依赖微调、强化学习或服务端托管工具。
 
-### 非目标（v1）
+### 非目标与版本边界
 
 - 不复现 ACM 的 post-training / RL 训练流程，v1 及后续版本均不以训练作为功能前提。
 - 不复用、包装或嵌入 Hermes 及其他现成 Agent 产品的运行时、权限系统或工具执行器。
-- 不承诺跨会话人格记忆；这属于已有 memory-provider 的职责。
+- v1 不承诺跨会话长期记忆；v0.2.3 起由自研 SQLite memory 子系统提供有来源、可确认、可删除的事实与流程记忆，但不自动塑造“人格”。
 - 不使用 LangChain、LlamaIndex、OpenAI Agents SDK、Claude Agent SDK、AutoGen、CrewAI 等 Agent 框架；模型 API 客户端仅负责网络协议。
 - 不使用 API 服务端托管的 Code Interpreter、Files API 或远程文件工具；工具循环、解析、终止、重试和本地执行均由本项目实现。
 
@@ -89,7 +89,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 5. 尚未归档的最近对话尾部；
 6. 完整的工具调用轮次（caller 与全部 tool result 要么一起保留，要么一起移除）。
 
-它不等同于完整聊天记录。构造器按 SQLite `sessions.context_version` 缓存相同投影；事件追加、固定、取消固定、归档、checkpoint 或工作区路径变化都在事务中递增版本。因此 Core 重启或另一个 Store 实例的写入也能使本地 WorkingSet 缓存失效。普通事件只能使用软预算，固定证据可以使用软预算与模型真实窗口之间的余量，但不能突破硬上限。任何裁剪都只改变投影，不会修改 EventLog。
+它不等同于完整聊天记录。预算是安全上限，不是必须填满的目标；默认最多选取 96 个最近事件，避免无关历史增加费用与延迟。构造器按 SQLite `sessions.context_version` 缓存相同投影；事件追加、固定、取消固定、归档、checkpoint 或工作区路径变化都在事务中递增版本。因此 Core 重启或另一个 Store 实例的写入也能使本地 WorkingSet 缓存失效。普通事件只能使用软预算，固定证据可以使用软预算与模型真实窗口之间的余量，但不能突破硬上限。任何裁剪都只改变投影，不会修改 EventLog。
 
 ### 4.3 Context Orchestrator（运行时控制面）
 
@@ -121,7 +121,7 @@ tool_name, tool_call_id, tags, sensitivity, provenance
 
 `context_search` 当前采用两路可解释召回：SQLite FTS5/BM25，以及查询时构造的中文字符/词片段稀疏 TF-IDF 向量；两路通过 RRF 融合，完整短语命中拥有最终排序保护。向量通道只扫描最近的有界非敏感事件，不写入数据库；FTS5 仍负责全历史精确召回。
 
-`v0.2.3` 已增加 OpenCC/jieba 中文规范化、索引版本重建，以及带来源、作用域和生命周期的 SQLite 长期记忆；记忆检索使用持久 FTS + 稀疏索引。中文/多语稠密 embedding 仍属于需先评测再启用的 v2 后续项，见 [v2-roadmap.md](v2-roadmap.md)。
+`v0.2.3` 已增加 OpenCC/jieba 中文规范化、索引版本重建，以及带来源、作用域和生命周期的 SQLite 长期记忆；记忆检索使用持久 FTS + 稀疏索引。成功的 `fs_write` / `fs_replace` 任务在最终回复落库后会生成工作区级 episodic candidate；普通对话、只读任务、失败或取消不触发，candidate 需用户确认后才会进入跨会话召回。中文/多语稠密 embedding 仍属于需先评测再启用的 v2 后续项，见 [v2-roadmap.md](v2-roadmap.md)。
 
 `Evidence Pack` 将多个命中组织为带引用的小型证据包：
 
@@ -412,7 +412,10 @@ Core service 是独立可执行进程，GUI 崩溃或重启不应破坏任务和
 工作区文本工具自身不是 OS 沙箱。扩展 Host、MCP stdio 和受控 Runner 均经过独立
 Permission Broker 和 OS 沙箱启动器。Runner 不接受 shell 或任意参数，而是将去掉密钥、依赖、
 Git 对象与构建目录的项目快照放入临时执行目录，按预定义模板运行，并返回快照 SHA、超时、
-截断状态和可引用 event ID。OS 沙箱不可用时默认拒绝执行。
+截断状态和可引用 event ID。未命中授权时，流式 Agent loop 在任何副作用前发出
+`permission_required` 并暂停同一工具调用；Electron 显示命令模板、网络和文件边界。用户可仅批准一次、
+允许当前对话或拒绝，决策后原 call ID 继续并进入幂等证据链。审批等待不计入任务超时；
+取消流时自动拒绝孤立请求并将 invocation 收口为可审计失败。OS 沙箱不可用时默认拒绝执行。
 
 ### 14.5 打包与发布
 
@@ -590,13 +593,13 @@ v1 合并门槛：
 | WorkingSet / context tools | 已实现 | 归档区间从活动投影外置、原文可寻址恢复、固定证据跨归档保留、工具轮完整性与硬上限保护；中文 BM25 + 稀疏 TF-IDF 向量融合无需训练 |
 | v2 checkpoint / DB cache version | 已实现 | SQLite 持久 context/workspace version；模型与工具 schema SHA 参与 WorkingSet 缓存；GUI 按 revision CAS 写入，过期返回 409；checkpoint 可续跑，invocation 幂等回放 |
 | 中文规范化与检索 | 已实现 | NFKC、OpenCC、jieba、区域词别名、CJK n-gram；EventLog FTS 索引规则版本化并可重建，Exact/FTS/稀疏结果保持可解释 |
-| 长期记忆 | v2 后端已实现 | episodic/semantic/procedural；候选确认、冲突替代、过期、来源 event ID、作用域隔离、持久 FTS+稀疏索引、WorkingSet 相关召回、删除 tombstone；GUI 管理与稠密 embedding 待后续 |
+| 长期记忆 | v2 可用切片 | episodic/semantic/procedural；候选确认、冲突替代、惰性过期、来源 event ID、作用域隔离、持久 FTS+稀疏索引、WorkingSet 相关召回、删除 tombstone；GUI 可搜索、解释召回、确认冲突、查看审计和删除。导出/批量纠错与稠密 embedding 待后续 |
 | 国产模型接入 | 已实现协议层 | 支持 OpenAI-compatible endpoint；API 客户端只负责 HTTP，不托管工具执行 |
 | 工作区代码工具 | 已实现 | 安全读取/检索/创建目录、SHA-256 版本锁写入与精确替换；敏感文件、`.git`、依赖/缓存目录、二进制、路径逃逸、删除与执行均拒绝 |
 | 桌面 GUI | 已实现可测试基线 | Electron + React，包含响应式会话/聊天/检查器、停止生成、模型与扩展配置、Markdown 安全渲染；Thinking 与工具记录分别默认收起 |
 | 扩展生态 | v2 可执行切片 | 独立 Python/Node Host；逐次 Permission Broker；MCP stdio/Streamable HTTP、OAuth PKCE、官方 Registry remote 导入；CycloneDX SBOM、本机 Ed25519 安装签名与 fail-closed OS 沙箱。Open VSX/VSIX 与发布者公钥信任链仍待完成 |
-| 受控 Runner | 已实现 | 固定 Python/Node 测试模板、逐次授权、去敏快照、禁网 OS 沙箱、超时/输出/快照限额和 EventLog 证据引用；沙箱不可用时 fail closed |
-| 测试 | 已实现 | 164 个 Python 单元/集成/功能测试，13 个前端交互/Markdown 测试，核心覆盖率超过 80%，Ruff、类型检查与生产构建通过；真实 DeepSeek 同会话 10 次 checkpoint 后完成 |
+| 受控 Runner | 已实现 | 固定 Python/Node 测试模板、即时审批暂停/原调用续跑、去敏快照、禁网 OS 沙箱、超时/输出/快照限额和 EventLog 证据引用；macOS 可执行映射仅对可信 runtime/系统库开放，macOS 26 dyld 的根目录探测仅允许 `literal "/"`，已有真实 Seatbelt + Conda Python + unittest 集成测试；零输出信号终止会被标注为疑似启动故障；沙箱不可用时 fail closed |
+| 测试 | 已实现 | 196 个 Python 单元/集成/功能测试，23 个前端交互/Markdown 测试和 7 个 Electron 主进程边界测试，核心覆盖率超过 80%，Ruff、类型检查与生产构建通过；真实 DeepSeek 同会话 10 次 checkpoint 后完成 |
 
 本版明确不含任何训练流程，也不把 Hermes 或其他现成 Agent 产品作为运行依赖。真实厂商 API 的联网验收需要由用户提供 endpoint、model 与 API key。第三方执行采用三道门：server/extension 启用、独立 Host/transport、逐动作 Permission Broker；stdio/extension 还需 OS 沙箱可用。当前 macOS 测试宿主禁止嵌套 `sandbox-exec`，自动化验证了 fail-closed 路径；在普通桌面宿主上会先探测再运行。
 

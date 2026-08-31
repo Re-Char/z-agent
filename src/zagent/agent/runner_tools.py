@@ -166,6 +166,9 @@ class ControlledRunnerExecutor:
                 "snapshot_sha256": snapshot_info["sha256"],
                 "snapshot_files": snapshot_info["files"],
                 "exit_code": execution["exit_code"],
+                "signal": execution["signal"],
+                "diagnostic": execution["diagnostic"],
+                "startup_failure_suspected": execution["startup_failure_suspected"],
                 "timed_out": execution["timed_out"],
                 "output": execution["output"],
                 "output_truncated": execution["output_truncated"],
@@ -264,9 +267,30 @@ class ControlledRunnerExecutor:
                 process.kill()
             process.wait(timeout=5)
         reader.join(timeout=5)
+        return_code = process.returncode
+        signal_name = None
+        if return_code is not None and return_code < 0:
+            signal_number = -return_code
+            try:
+                signal_name = signal.Signals(signal_number).name
+            except ValueError:
+                signal_name = f"SIGNAL_{signal_number}"
+        decoded_output = output.decode("utf-8", errors="replace")
+        startup_failure_suspected = bool(signal_name and not decoded_output.strip() and not timed_out)
+        diagnostic = None
+        if startup_failure_suspected:
+            diagnostic = (
+                f"测试进程在产生任何输出前被 {signal_name} 终止，"
+                "疑似解释器、动态链接器或 OS 沙箱启动故障，而非普通测试失败。"
+            )
+        elif signal_name:
+            diagnostic = f"测试进程被 {signal_name} 终止。"
         return {
-            "exit_code": process.returncode,
+            "exit_code": return_code,
+            "signal": signal_name,
+            "diagnostic": diagnostic,
+            "startup_failure_suspected": startup_failure_suspected,
             "timed_out": timed_out,
-            "output": output.decode("utf-8", errors="replace"),
+            "output": decoded_output,
             "output_truncated": truncated,
         }

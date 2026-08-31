@@ -7,6 +7,8 @@ directories:
 files:
   - main.cjs
   - preload.cjs
+  - export.cjs
+  - sse.cjs
   - package.json
   - from: ../ui/dist
     to: ui

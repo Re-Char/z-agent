@@ -51,6 +51,16 @@ class ConfirmMemoryRequest(StrictRequest):
     supersedes_memory_id: Optional[str] = Field(default=None, min_length=5, max_length=80)
 
 
+class UpdateMemoryRequest(StrictRequest):
+    pinned: bool
+    expected_pinned: bool
+
+
+class CorrectMemoryRequest(StrictRequest):
+    content: str = Field(min_length=1, max_length=8000)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class ForgetMemoryRequest(StrictRequest):
     reason: str = Field(min_length=1, max_length=1000)
 

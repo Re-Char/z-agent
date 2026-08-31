@@ -65,12 +65,27 @@ CHECKPOINT_CHAIN_PROMPT = """CHECKPOINT_CHAIN_ACCEPTANCE_V1：这是 checkpoint 
 每一步必须等待前一步工具结果。不要归档，不要创建其他文件。"""
 
 
+WEB_2048_PROMPT = """WEB_2048_ACCEPTANCE_V1：请在当前工作区真正创建一个可直接打开运行的网页版
+2048 小游戏，不要只给方案或在回答中粘贴代码。
+
+验收要求：
+1. 产物为一个自包含的 index.html，不依赖网络、CDN、构建工具或外部资源；
+2. 4x4 棋盘实现正确的上下左右移动、同一格每步只合并一次、随机生成 2/4；
+3. 显示当前分数和 localStorage 最佳分数，支持重新开始、胜利提示和无可移动时的失败提示；
+4. 支持键盘方向键/WASD，并提供移动端触摸滑动；
+5. 页面需适配窄屏，使用中文界面，代码中不得使用 eval 或内联远程脚本。
+
+执行要求：只做一次最小目录检查，然后直接写入 index.html；写入后必须 fs_read 核验文件未截断，
+检查关键函数、事件监听和结束判定确实存在。最终简短列出实际创建与核验的证据。"""
+
+
 PHASES = {
     "build": BUILD_PROMPT,
     "audit": AUDIT_PROMPT,
     "extend": EXTEND_PROMPT,
     "finalize": FINALIZE_PROMPT,
     "checkpoint_chain": CHECKPOINT_CHAIN_PROMPT,
+    "web_2048": WEB_2048_PROMPT,
 }
 
 

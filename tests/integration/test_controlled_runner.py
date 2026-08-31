@@ -3,6 +3,7 @@ import pytest
 from zagent.agent.runner_tools import ControlledRunnerExecutor
 from zagent.domain.errors import PermissionRequiredError, ToolExecutionError
 from zagent.security import PermissionBroker
+from zagent.security.sandbox import SandboxLauncher
 
 
 def _approve(broker, session_id, profile, timeout):
@@ -53,6 +54,43 @@ def test_controlled_runner_executes_approved_template_on_secret_free_snapshot(
     assert "OK" in result["output"]
     assert "must-not-enter-snapshot" not in result["output"]
     assert not (workspace / ".zagent-runner").exists()
+
+
+def test_controlled_runner_executes_in_real_os_sandbox_when_available(
+    store, session_id, tmp_path
+):
+    launcher = SandboxLauncher()
+    if not launcher.available():
+        pytest.skip("host does not permit a nested OS sandbox")
+    workspace = tmp_path / "strict-project"
+    tests_dir = workspace / "tests"
+    tests_dir.mkdir(parents=True)
+    (tests_dir / "test_smoke.py").write_text(
+        "import unittest\n\n"
+        "class SmokeTest(unittest.TestCase):\n"
+        "    def test_math(self):\n"
+        "        self.assertEqual(2 + 2, 4)\n",
+        encoding="utf-8",
+    )
+    store.update_workspace(
+        store.get_session(session_id)["workspace_id"], path=str(workspace)
+    )
+    broker = PermissionBroker(store)
+    runner = ControlledRunnerExecutor(
+        lambda _session_id: str(workspace), broker, launcher=launcher
+    )
+    _approve(broker, session_id, "python_unittest", 10)
+
+    result = runner.execute(
+        session_id,
+        "runner_execute",
+        {"profile": "python_unittest", "timeout_seconds": 10},
+    )
+
+    assert result["ok"] is True
+    assert result["sandboxed"] is True
+    assert result["signal"] is None
+    assert "OK" in result["output"]
 
 
 def test_controlled_runner_requires_permission_and_enforces_timeout(store, session_id, tmp_path):
@@ -148,3 +186,43 @@ def test_runner_snapshot_rejects_size_limits(store, session_id, tmp_path):
             {"profile": "python_unittest", "timeout_seconds": 10},
         )
     assert not (workspace / ".zagent-runner").exists()
+
+
+def test_runner_reports_zero_output_signal_as_probable_startup_failure(
+    store, session_id, tmp_path, monkeypatch
+):
+    workspace = tmp_path / "signal-project"
+    workspace.mkdir()
+    broker = PermissionBroker(store)
+    runner = ControlledRunnerExecutor(
+        lambda _session_id: str(workspace), broker, sandbox_enabled=False
+    )
+
+    class AbortedProcess:
+        stdout = None
+        returncode = -6
+        pid = 123
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    class EmptyStdout:
+        def read(self, _size):
+            return b""
+
+    aborted = AbortedProcess()
+    aborted.stdout = EmptyStdout()
+    monkeypatch.setattr("zagent.agent.runner_tools.subprocess.Popen", lambda *_a, **_kw: aborted)
+    _approve(broker, session_id, "python_unittest", 10)
+
+    result = runner.execute(
+        session_id,
+        "runner_execute",
+        {"profile": "python_unittest", "timeout_seconds": 10},
+    )
+
+    assert result["ok"] is False
+    assert result["exit_code"] == -6
+    assert result["signal"] == "SIGABRT"
+    assert result["startup_failure_suspected"] is True
+    assert "动态链接器或 OS 沙箱" in result["diagnostic"]

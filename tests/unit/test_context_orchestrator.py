@@ -9,6 +9,7 @@ def test_status_reports_budget_and_public_token_count(context, store, session_id
     assert result["working_set"]["budget"] > 0
     assert result["working_set"]["tokens"] > 0
     assert "token_estimate" not in result["working_set"]
+    assert result["memory_stats"] == {"active": 0, "candidates": 0}
 
 
 def test_search_validates_arguments(context, session_id):

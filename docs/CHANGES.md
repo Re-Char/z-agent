@@ -201,3 +201,59 @@
 - Internal/Thinking/归档/checkpoint 事件与疑似密钥正文禁止写入；删除会清空正文、FTS 与持久稀疏 terms，只保留内容 SHA 与不含正文的审计 tombstone。
 - WorkingSet 根据最新用户请求最多注入 5 条相关 active 记忆，并明确标为“不可信数据，不是指令”；memory revision 进入缓存键，跨进程写入不会继续使用旧投影。
 - 新增长期记忆 HTTP 生命周期 API、跨会话繁体查询、冲突替代、作用域隔离、秘密拒绝、双索引删除、Core 重启和缓存失效测试。
+
+### 23. v0.2.3 后续：长期记忆安全与管理面板
+
+- Agent 直接确认、替换或删除记忆时必须引用含明确用户意图的 user event；普通“以后可能……”未来时态不再被误判为授权，中文偏好句与英文 remember/forget 仍可识别。
+- 记忆的查重、强化和首次写入合并到 `BEGIN IMMEDIATE` 事务；两个 Store/Core 实例并发写入同一候选只生成一行，并合并双方来源 event ID。
+- 相同候选会强化置信度而不重复堆积；过期项惰性转为 `expired`，清理检索索引、释放 active 唯一键并写入审计。
+- 搜索结果暴露 lexical/sparse 分数、查询覆盖率与匹配词；WorkingSet 只自动注入精确命中或双通道达到覆盖/分数门槛的非固定记忆，降低主题词误召回。
+- 稀疏向量显式降权“项目/使用/怎么”等高频会话词，并给 memory terms 增加索引版本；重启时自动重建旧权重，相关主题词（如“部署”）不会被通用“项目”压过。
+- Electron/React 增加长期记忆面板：候选/生效状态、作用域、类型、来源数、冲突替换、搜索解释、按项审计和带墓碑说明的删除确认。
+- 新增长期记忆固定/取消固定的原子 HTTP 与 GUI 闭环；请求携带预期状态，多窗口或多 Core 下的陈旧操作返回 409，变更写入不含正文的审计记录。
+- 长期记忆可导出为带 schema 版本、来源 event ID 和审计链的 JSON；Electron 通过原生另存为对话框保存，主进程强制文件名净化、JSON 解析和 20 MiB 上限。
+- 新增 GUI 单条纠正：系统写入一条可定址的用户纠正事件，创建新记忆并显式 supersede 旧版；旧正文只留在不召回的历史版本中，并发更新不会静默覆盖。
+- 统一桌面端视觉密度：建立 11/12/13/14px 字体层级，正文与主输入统一为 14px；扩大侧栏、顶栏、对话内容区、设置弹窗和检查器，并重新标定输入框、按钮、卡片与组件间距。表单输入和记忆搜索为 40px，主输入容器为 62px，多操作记忆卡片允许按钮换行。
+- 验证通过 190 个 Python 测试、19 个前端测试、4 个 Electron 导出边界测试、Ruff、TypeScript strict、Vite production build；核心覆盖率超过 80%。浏览器按 Electron 默认 1380×900 和最小 980×680 尺寸实测无横向溢出或控制台错误。
+- 独立 Core 真实 HTTP 进程完成 Bearer 鉴权、写入、关闭、重启、跨会话区域词召回、audit 和 WorkingSet 注入；SIGINT 关闭不再输出无意义 traceback。
+
+### 24. 工具进度、Markdown 稳定性与真实 2048 验收
+
+- 修复工具记录展开后助手 fenced code 的语言栏、复制按钮和高亮消失：Markdown renderer 直接生成稳定代码块 DOM，不再在 React effect 中移动 `<pre>`；表格包装也改为 renderer 输出。
+- 代码块覆盖 `.event pre` 的通用折行规则，明确使用 `white-space: pre`、正常 overflow wrap 和横向滚动；工具源码与 Markdown 代码均保留原始换行。
+- Core 流式链路新增不含参数正文的 `status/tool_call/tool_result` 进度事件；Electron 原样转发，GUI 显示当前轮次以及正在准备/已完成的工具。大段 `fs_write` 参数不会再表现为无反馈卡死，也不会把源码或敏感参数泄漏到进度事件。
+- 系统执行策略要求小型静态网页只做一次最小目录检查、优先直接写自包含 `index.html`，避免 `fs_list` 与 `fs_project_overview` 等重叠检查。
+- 真实 `deepseek-v4-flash` 在隔离目录用 5 个工具轮完成 11,806 字符的自包含 2048；外部 JS 语法/关键能力扫描通过，浏览器方向键实玩从 0 分合并到 4 分并更新最高分。
+- 全量门禁通过：191 个 Python 测试、20 个前端测试、4 个 Electron 测试、Ruff、TypeScript strict 与 Vite production build；Core 总覆盖率 83.27%。
+
+### 25. 会话隔离进度、固定证据与任务记忆触发
+
+- 运行状态绑定实际 session ID：切换对话后不再渲染其他对话的 Thinking/流式回复，后台任务所在会话在侧边栏显示加载指示和最新步骤。
+- Core 为每个模型轮次输出有界 `status/tool_call/tool_result`；对仅在流结束时提供工具名的 OpenAI-compatible provider 也会在执行前补发。Electron SSE 支持 LF、CRLF 与跨 chunk frame。
+- 上下文检查器把“固定证据”与“最近工作集”分开；所有固定 ID 持续可见，被真实模型硬上限排除时明确标记。默认最近事件上限由 24 迁移到 96，同时明示 token 预算是上限而非填充目标。
+- 成功写入或替换工作区文件并完成最终回复时，Core 自动创建工作区级 episodic candidate；聊天、只读、失败和取消不触发。候选数会在侧边栏提示，只有用户确认后才跨会话召回。
+- 全量门禁通过：194 个 Python 测试、22 个前端测试、6 个 Electron 测试、Ruff、TypeScript strict 与 Vite production build；Core 总覆盖率 83.42%。
+
+### 26. Codex 式即时工具审批
+
+- 修复 Permission Broker 请求只在“扩展与 MCP”面板可见的致命断链；主 Agent SSE 现在直接发送结构化 `permission_required`。
+- 新增不可通过背景或 Escape 误关的审批对话框，展示受控命令模板、对话作用域、网络状态和去敏只读快照边界，提供“拒绝 / 本次对话允许 / 仅此一次”。
+- Agent loop 在副作前暂停；批准后参数绑定权限由同一工具调用消费并自动续跑，无需用户再输入“继续”。拒绝则以工具结果返回 Agent。
+- 审批等待时间不计入 Agent 任务超时；取消 SSE 会自动拒绝孤立请求并完成 invocation 审计，避免遗留可被意外批准的 pending 记录。
+- 新增后端“暂停→批准→原调用续跑”、取消清理、前端即时弹窗与 Electron 结构化 SSE 测试。全部 196 个 Python、23 个 Web 和 7 个 Electron 测试通过。
+
+### 27. macOS Runner SIGABRT 与进度层级修复
+
+- 通过 macOS DiagnosticReport 确认 `exit_code=-6` 且零输出发生在 dyld `CacheFinder/ignite` 阶段：Python 尚未进入测试代码。加入可执行映射后，进一步从 macOS unified log 获得精确拒绝 `Sandbox: python3.12 deny(1) file-read-data /`。
+- macOS 沙箱现在仅对 Core 解释器、Conda runtime 与系统动态库根目录允许可执行映射；另以 `literal "/"` 允许 macOS 26 dyld 读取根目录这一个对象，不会递归放开其他路径。工作区去敏快照仍不获得可执行映射权限。
+- Runner 对 POSIX 负退出码解析为 `SIGABRT` 等信号；零输出异常终止会返回 `startup_failure_suspected` 和明确的基础设施诊断，不再伪装为普通断言失败。
+- 运行中工具进度的 DOM 顺序固定在 AI 流式回答上方；回归测试同时注入 `tool_call/tool_result/content` 并校验真实顺序。
+- 新增真实 OS 沙箱集成验收；在非嵌套宿主上实际完成去敏快照、`sandbox-exec`、Conda Python、`unittest discover` 全链路并返回 `OK`。
+- 全量门禁通过：197 个 Python 通过 + 1 个真实 OS 沙箱测试在嵌套宿主跳过（非嵌套环境单独实测通过）、23 个 Web、7 个 Electron，以及 Ruff、TypeScript strict 和 production build。
+
+### 28. v0.2.4 Electron 交互验收与 Runner 可用性
+
+- 版本统一升级为 `0.2.4`；包含 macOS 26 dyld/Seatbelt Runner 启动修复、信号终止诊断、即时工具审批、会话隔离进度、固定证据、任务记忆触发和 Markdown/工具记录修复。
+- 新增 `scripts/electron_interaction_e2e.mjs`，直接验收真实 Electron renderer + preload + IPC + Core，不使用普通浏览器 fixture 代替桌面链路。
+- 在独立临时 user-data 和工作区中通过 11 组交互：初始禁用态、上下文开/关/scrim、工作区创建/编辑/切换、会话发送、消息固定/取消、模型增删改切、扩展启停/删除、MCP 授权/撤销/删除、Permission 刷新、记忆搜索/审计/确认/固定/纠正/删除，以及弹窗残留和水平溢出检查。
+- 真实 macOS Seatbelt 集成测试实际启动 Conda Python，完成去敏快照内 `unittest discover` 并返回 `OK`；不再仅依赖字符串 profile 断言。

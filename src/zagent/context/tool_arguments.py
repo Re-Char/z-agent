@@ -56,13 +56,13 @@ class MemoryRememberArgs(StrictArgs):
     scope: Literal["workspace", "user"] = "workspace"
     confidence: float = Field(default=0.8, ge=0, le=1)
     confirmed: bool = False
-    pinned: bool = False
     expires_at: Optional[str] = None
 
 
 class MemoryConfirmArgs(StrictArgs):
     memory_id: str = Field(min_length=5, max_length=80)
     supersedes_memory_id: Optional[str] = Field(default=None, min_length=5, max_length=80)
+    confirmation_event_id: str = Field(min_length=5, max_length=80)
 
 
 class MemorySearchArgs(StrictArgs):
@@ -78,6 +78,7 @@ class MemoryListArgs(StrictArgs):
 class MemoryForgetArgs(StrictArgs):
     memory_id: str = Field(min_length=5, max_length=80)
     reason: str = Field(min_length=1, max_length=1000)
+    confirmation_event_id: str = Field(min_length=5, max_length=80)
 
 
 CONTEXT_ARGUMENT_TYPES: Dict[str, Type[StrictArgs]] = {
@@ -105,10 +106,16 @@ CONTEXT_TOOL_DESCRIPTIONS = {
         "将有 event_id 来源的稳定事实、任务经历或用户流程偏好写入长期记忆。"
         "仅当用户明确要求记住时 confirmed 才可为 true；否则只创建候选"
     ),
-    "memory_confirm": "确认候选长期记忆；冲突更新必须显式给出被替代的 memory_id",
+    "memory_confirm": (
+        "确认候选长期记忆；必须引用用户明确要求记住的 confirmation_event_id，"
+        "冲突更新还要显式给出被替代的 memory_id"
+    ),
     "memory_search": "跨当前工作区会话检索已确认的长期记忆，返回来源 event_id 与召回通道",
     "memory_list": "列出当前用户和工作区作用域内的长期记忆",
-    "memory_forget": "删除长期记忆正文与检索索引，保留不含正文的审计 tombstone",
+    "memory_forget": (
+        "删除长期记忆正文与检索索引；必须引用用户明确要求删除记忆的 confirmation_event_id，"
+        "只保留不含正文的审计 tombstone"
+    ),
 }
 
 

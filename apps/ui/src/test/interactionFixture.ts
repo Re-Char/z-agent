@@ -25,6 +25,10 @@ const events: Record<string, FixtureEvent[]> = {
   ],
   fixture_empty: [],
 };
+const fixtureMemories = [
+  { memory_id: "mem_fixture_candidate", scope_type: "workspace", scope_id: "fixture_ws", memory_type: "semantic", memory_key: "项目数据库", content: "项目改用 SQLite", confidence: .84, status: "candidate", pinned: false, created_reason: "检测到用户更新", source_session_id: "fixture_tools", source_event_ids: ["evt_user"], created_at: timestamp, updated_at: timestamp, last_verified_at: timestamp, expires_at: null, conflict_memory_id: "mem_fixture_active" },
+  { memory_id: "mem_fixture_active", scope_type: "workspace", scope_id: "fixture_ws", memory_type: "semantic", memory_key: "项目数据库", content: "项目使用 PostgreSQL", confidence: .95, status: "active", pinned: true, created_reason: "用户明确确认", source_session_id: "fixture_tools", source_event_ids: ["evt_user"], created_at: timestamp, updated_at: timestamp, last_verified_at: timestamp, expires_at: null, conflict_memory_id: null },
+];
 
 function contextFor(sessionId: string) {
   const items = events[sessionId] || [];
@@ -45,6 +49,7 @@ function contextFor(sessionId: string) {
 export function installInteractionFixture() {
   let activeModelId = "fixture_deepseek";
   let cancelled = false;
+  let memories = fixtureMemories.map((item) => ({ ...item }));
   const models = [
     { id: "fixture_deepseek", name: "DeepSeek Fixture", provider: "deepseek", model: "deepseek-chat", base_url: "https://api.deepseek.com", context_window: 64000, hard_limit_ratio: .82, soft_limit_ratio: .7 },
     { id: "fixture_echo", name: "Local Echo", provider: "echo", model: "zagent-local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 },
@@ -52,6 +57,7 @@ export function installInteractionFixture() {
 
   window.zagent = {
     platform: "browser-fixture",
+    async saveJson(suggestedName) { return `/fixture/exports/${suggestedName}`; },
     async request<T>(path: string, options?: { method?: string; body?: unknown }): Promise<T> {
       if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "fixture_ws", name: "交互测试工作区", path: "/fixture/project", session_count: sessions.length }] } as T;
       if (path === "/v1/config") return { locale: "zh-CN", models, active_model_id: activeModelId, model: models.find((item) => item.id === activeModelId)! } as T;
@@ -61,6 +67,42 @@ export function installInteractionFixture() {
       if (eventMatch) return { events: events[eventMatch[1]] || [] } as T;
       const contextMatch = path.match(/^\/v1\/sessions\/([^/]+)\/context$/);
       if (contextMatch) return contextFor(contextMatch[1]) as T;
+      if (/^\/v1\/sessions\/[^/]+\/memories\?include_candidates=true/.test(path)) return { memories } as T;
+      if (/^\/v1\/sessions\/[^/]+\/memories\/export$/.test(path)) return { schema_version: 1, exported_at: timestamp, session_id: "fixture_tools", workspace_id: "fixture_ws", memories: [] } as T;
+      if (/^\/v1\/sessions\/[^/]+\/memories\?query=/.test(path)) {
+        const query = decodeURIComponent(path.match(/[?&]query=([^&]*)/)?.[1] || "").toLowerCase();
+        return { results: memories.filter((item) => item.status === "active" && `${item.memory_key} ${item.content}`.toLowerCase().includes(query)).map((memory) => ({ memory, channels: ["exact", "lexical", "sparse"], exact_match: true, fusion_score: .03, sparse_query_coverage: 1, matched_terms: [query] })) } as T;
+      }
+      const memoryAuditMatch = path.match(/^\/v1\/sessions\/[^/]+\/memories\/([^/]+)\/audit/);
+      if (memoryAuditMatch) return { audit: [{ audit_id: `maud_${memoryAuditMatch[1]}`, memory_id: memoryAuditMatch[1], action: "created", content_sha256: "a".repeat(64), details: { status: "candidate" }, created_at: timestamp }] } as T;
+      const memoryConfirmMatch = path.match(/^\/v1\/sessions\/[^/]+\/memories\/([^/]+)\/confirm$/);
+      if (memoryConfirmMatch && options?.method === "POST") {
+        const memory = memories.find((item) => item.memory_id === memoryConfirmMatch[1]);
+        const supersedesId = (options.body as { supersedes_memory_id?: string })?.supersedes_memory_id;
+        memories = memories.filter((item) => item.memory_id !== supersedesId).map((item) => item.memory_id === memory?.memory_id ? { ...item, status: "active", conflict_memory_id: null } : item);
+        return { memory } as T;
+      }
+      const memoryCorrectMatch = path.match(/^\/v1\/sessions\/[^/]+\/memories\/([^/]+)\/correct$/);
+      if (memoryCorrectMatch && options?.method === "POST") {
+        const update = options.body as { content: string };
+        const previous = memories.find((item) => item.memory_id === memoryCorrectMatch[1]);
+        if (!previous) throw new Error("记忆不存在");
+        const replacement = { ...previous, memory_id: `${previous.memory_id}_corrected`, content: update.content, supersedes_memory_id: previous.memory_id };
+        memories = memories.filter((item) => item.memory_id !== previous.memory_id).concat(replacement);
+        return { memory: replacement, superseded_memory_id: previous.memory_id, evidence_event_id: "evt_correction" } as T;
+      }
+      const memoryDeleteMatch = path.match(/^\/v1\/sessions\/[^/]+\/memories\/([^/]+)$/);
+      if (memoryDeleteMatch && options?.method === "PATCH") {
+        const update = options.body as { pinned: boolean; expected_pinned: boolean };
+        const memory = memories.find((item) => item.memory_id === memoryDeleteMatch[1]);
+        if (!memory || memory.pinned !== update.expected_pinned) throw new Error("记忆固定状态已变更");
+        memories = memories.map((item) => item.memory_id === memoryDeleteMatch[1] ? { ...item, pinned: update.pinned } : item);
+        return { memory: memories.find((item) => item.memory_id === memoryDeleteMatch[1]) } as T;
+      }
+      if (memoryDeleteMatch && options?.method === "DELETE") {
+        memories = memories.filter((item) => item.memory_id !== memoryDeleteMatch[1]);
+        return { memory_id: memoryDeleteMatch[1], status: "deleted", tombstone: true } as T;
+      }
       if (/^\/v1\/models\/[^/]+\/activate$/.test(path)) {
         activeModelId = path.split("/")[3];
         return { locale: "zh-CN", models, active_model_id: activeModelId, model: models.find((item) => item.id === activeModelId)! } as T;

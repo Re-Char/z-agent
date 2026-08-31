@@ -4,9 +4,9 @@ import { CodeBlock, languageFromPath, Markdown } from "./Markdown";
 type Session = { session_id: string; title: string; updated_at: string; event_count: number };
 type Event = { event_id: string; sequence: number; timestamp: string; kind: string; role: string; payload: unknown; token_estimate: number; tool_name?: string };
 type Checkpoint = { checkpoint_id: string; reason: string; state: { status?: string; objective?: string; completed?: unknown[]; pending?: unknown[]; failure_reason?: string } };
-type ContextStatus = { context_version?: number; stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; latest_checkpoint?: Checkpoint | null; archive_stats?: { count: number; tokens: number }; warning?: string | null; pinned_tokens: number };
+type ContextStatus = { context_version?: number; stats: { count: number; tokens: number }; working_set: { tokens: number; budget: number; included_event_ids: string[]; pinned_event_ids: string[]; dropped_pinned_ids: string[]; pinned_tokens: number }; latest_archive?: { archive_id: string; start_sequence: number; end_sequence: number; state: unknown }; latest_checkpoint?: Checkpoint | null; archive_stats?: { count: number; tokens: number }; memory_stats?: { active: number; candidates: number }; warning?: string | null; pinned_tokens: number };
 type ModelConfig = { id: string; name: string; provider: string; model: string; base_url: string; context_window: number; soft_limit_ratio: number; hard_limit_ratio: number };
-type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string };
+type AppConfig = { locale: string; model: ModelConfig; models: ModelConfig[]; active_model_id: string; recent_event_limit?: number };
 type TokenStats = { total_tokens: number; completion_tokens: number; cache_hit_tokens: number; cache_miss_tokens: number; cache_hit_rate: number; elapsed_seconds: number; tokens_per_second: number };
 type McpServer = { name: string; transport: string; enabled: boolean; approved: boolean; command?: string | null; args?: string[] | null; cwd?: string | null; env?: string[] | null; url?: string | null; status: string; oauth?: boolean; oauth_client_id?: string; oauth_scopes?: string[]; protocol_version?: string | null; server_info?: { name?: string; version?: string } };
 type McpTool = { name: string; description?: string; inputSchema: Record<string, unknown> };
@@ -15,6 +15,27 @@ type Workspace = { workspace_id: string; name: string; path: string; session_cou
 type PermissionRequest = { request_id: string; session_id?: string | null; subject_type: string; subject_id: string; action: string; details: Record<string, unknown>; status: string; created_at: string };
 type PermissionGrant = { grant_id: string; subject_type: string; subject_id: string; action: string; scope: string; session_id?: string | null };
 type RegistryServer = { name?: string; description?: string; server?: { name?: string; description?: string; version?: string } };
+type MemoryItem = {
+  memory_id: string; scope_type: "workspace" | "user"; scope_id: string;
+  memory_type: "episodic" | "semantic" | "procedural"; memory_key: string;
+  content: string; confidence: number; status: "active" | "candidate" | "superseded" | "deleted";
+  pinned: boolean; created_reason: string; source_session_id: string; source_event_ids: string[];
+  created_at: string; updated_at: string; last_verified_at: string; expires_at?: string | null;
+  supersedes_memory_id?: string | null; conflict_memory_id?: string | null;
+};
+type MemorySearchResult = {
+  memory: MemoryItem; channels: string[]; exact_match: boolean; fusion_score: number;
+  lexical_score?: number | null; sparse_score?: number | null; sparse_query_coverage?: number | null;
+  matched_terms: string[];
+};
+type MemoryAudit = {
+  audit_id: string; memory_id: string; action: string; content_sha256: string;
+  details: Record<string, unknown>; created_at: string;
+};
+type MemoryExport = {
+  schema_version: number; exported_at: string; session_id: string; workspace_id?: string | null;
+  memories: Array<MemoryItem & { audit: MemoryAudit[] }>;
+};
 
 const DEEPSEEK_PRESET = {
   model: "deepseek-v4-flash",
@@ -87,10 +108,12 @@ function App() {
   const [lastStats, setLastStats] = useState<TokenStats>();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [runningSessionId, setRunningSessionId] = useState<string>();
   const [error, setError] = useState("");
   const [coreStatus, setCoreStatus] = useState<"online" | "recovering" | "offline">("online");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [extensionsOpen, setExtensionsOpen] = useState(false);
+  const [memoriesOpen, setMemoriesOpen] = useState(false);
   const [extensions, setExtensions] = useState<Extension[]>([]);
   const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
@@ -98,9 +121,21 @@ function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [showToolTrace, setShowToolTrace] = useState(false);
   const [streaming, setStreaming] = useState<{ sessionId: string; text: string } | null>(null);
+  const [taskActivity, setTaskActivity] = useState("");
+  const [taskProgress, setTaskProgress] = useState<string[]>([]);
+  const [pendingPermission, setPendingPermission] = useState<PermissionRequest>();
+  const [permissionDecisionBusy, setPermissionDecisionBusy] = useState(false);
+  const [notice, setNotice] = useState("");
   const activeRefreshGeneration = useRef(0);
   const sessionRefreshGeneration = useRef(0);
   const workspaceLandingId = useRef<string | undefined>(undefined);
+  const activeIdRef = useRef<string | undefined>(undefined);
+
+  const appendTaskProgress = useCallback((label: string) => {
+    setTaskProgress((current) => current.at(-1) === label
+      ? current
+      : [...current, label].slice(-6));
+  }, []);
 
   const refreshWorkspaces = useCallback(async () => {
     const response = await api<{ workspaces: Workspace[] }>("/v1/workspaces");
@@ -133,7 +168,7 @@ function App() {
       api<{ events: Event[] }>(`/v1/sessions/${sessionId}/events`),
       api<ContextStatus>(`/v1/sessions/${sessionId}/context`)
     ]);
-    if (generation !== activeRefreshGeneration.current) return;
+    if (generation !== activeRefreshGeneration.current || activeIdRef.current !== sessionId) return;
     setEvents(eventData.events);
     setContext(contextData);
   }, []);
@@ -144,6 +179,7 @@ function App() {
   useEffect(() => {
     window.zagent?.onCoreStatus?.((status) => setCoreStatus(status.status));
   }, []);
+  useEffect(() => { activeIdRef.current = activeId; }, [activeId]);
   useEffect(() => {
     if (activeWorkspaceId) refreshSessions(activeWorkspaceId).catch((reason) => setError(friendlyError(reason)));
   }, [activeWorkspaceId, refreshSessions]);
@@ -178,9 +214,11 @@ function App() {
 
   async function createSession() {
     try {
+      setMemoriesOpen(false);
       workspaceLandingId.current = undefined;
       const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: "新任务", workspace_id: activeWorkspaceId } });
       await refreshSessions(activeWorkspaceId);
+      activeIdRef.current = session.session_id;
       setActiveId(session.session_id);
       setEvents([]);
       setContext(undefined);
@@ -192,12 +230,13 @@ function App() {
   function selectSession(sessionId: string) {
     activeRefreshGeneration.current += 1;
     workspaceLandingId.current = undefined;
+    activeIdRef.current = sessionId;
     setActiveId(sessionId);
     setEvents([]);
     setContext(undefined);
     setLastStats(undefined);
-    setStreaming(null);
     setShowToolTrace(false);
+    setMemoriesOpen(false);
     setError("");
   }
 
@@ -214,6 +253,8 @@ function App() {
     setContext(undefined);
     setLastStats(undefined);
     setStreaming(null);
+    setTaskActivity("");
+    setMemoriesOpen(false);
     setError("");
   }
 
@@ -227,6 +268,9 @@ function App() {
     setEvents([]);
     setContext(undefined);
     setLastStats(undefined);
+    setMemoriesOpen(false);
+    setStreaming(null);
+    setTaskActivity("");
     setError("");
   }
 
@@ -236,6 +280,9 @@ function App() {
     let expectedContextVersion = sessionId ? context?.context_version : 0;
     setInput("");
     setBusy(true);
+    setTaskActivity("正在分析任务");
+    setTaskProgress(["正在建立任务请求"]);
+    if (sessionId) setRunningSessionId(sessionId);
     cancelRequested.current = false;
     setError("");
     let optimistic: Event | null = null;
@@ -246,7 +293,9 @@ function App() {
         const session = await api<Session>("/v1/sessions", { method: "POST", body: { title: content.slice(0, 24), workspace_id: activeWorkspaceId } });
         sessionId = session.session_id;
         expectedContextVersion = 0;
+        activeIdRef.current = sessionId;
         setActiveId(sessionId);
+        setRunningSessionId(sessionId);
       }
       const targetSessionId = sessionId;
       // Optimistic render: show the user's message immediately after a session exists.
@@ -270,6 +319,27 @@ function App() {
             if (streamEvent.type === "content") {
               reply += streamEvent.text || "";
               setStreaming({ sessionId: targetSessionId, text: reply });
+              setTaskActivity("正在生成回答");
+            } else if (streamEvent.type === "tool_call") {
+              const label = `正在准备工具：${streamEvent.name || "未知工具"}`;
+              setTaskActivity(label);
+              appendTaskProgress(label);
+            } else if (streamEvent.type === "tool_result") {
+              const outcomeLabel = streamEvent.ok === false ? "执行失败，正在处理" : "已完成，正在继续";
+              const label = `${streamEvent.name || "工具"}${outcomeLabel}${streamEvent.detail ? ` · ${streamEvent.detail}` : ""}`;
+              setTaskActivity(label);
+              appendTaskProgress(label);
+            } else if (streamEvent.type === "permission_required" && streamEvent.request) {
+              setPendingPermission(streamEvent.request);
+              const label = `等待批准：${permissionSubjectLabel(streamEvent.request)}`;
+              setTaskActivity(label);
+              appendTaskProgress(label);
+            } else if (streamEvent.type === "status") {
+              const label = streamEvent.message || (streamEvent.round && streamEvent.round > 1
+                ? `正在规划第 ${streamEvent.round} 步`
+                : "正在分析任务");
+              setTaskActivity(label);
+              appendTaskProgress(label);
             }
           }
         );
@@ -280,7 +350,9 @@ function App() {
         if (outcome?.checkpoint) checkpointFailure = outcome.checkpoint;
         if (outcome?.message) throw new Error(outcome.message);
         if (outcome?.result && (outcome.result as { stats?: TokenStats }).stats) {
-          setLastStats((outcome.result as { stats: TokenStats }).stats);
+          if (activeIdRef.current === targetSessionId) {
+            setLastStats((outcome.result as { stats: TokenStats }).stats);
+          }
         }
       } else {
         const result = await api<{ stats: TokenStats }>(`/v1/sessions/${targetSessionId}/messages`, {
@@ -305,7 +377,35 @@ function App() {
       }
     } finally {
       setBusy(false);
+      setRunningSessionId(undefined);
       setStreaming(null);
+      setTaskActivity("");
+      setTaskProgress([]);
+      setPendingPermission(undefined);
+      setPermissionDecisionBusy(false);
+    }
+  }
+
+  async function decideActivePermission(
+    decision: "approved" | "denied",
+    scope: "once" | "session"
+  ) {
+    if (!pendingPermission || permissionDecisionBusy) return;
+    setPermissionDecisionBusy(true);
+    setError("");
+    try {
+      await api(`/v1/permissions/requests/${pendingPermission.request_id}/decision`, {
+        method: "POST",
+        body: { decision, scope },
+      });
+      const label = decision === "approved" ? "已批准，正在安全执行" : "已拒绝，正在返回 Agent";
+      setTaskActivity(label);
+      appendTaskProgress(label);
+      setPendingPermission(undefined);
+    } catch (reason) {
+      setError(friendlyError(reason));
+    } finally {
+      setPermissionDecisionBusy(false);
     }
   }
 
@@ -323,6 +423,8 @@ function App() {
   async function stopGeneration() {
     cancelRequested.current = true;
     setStreaming(null);
+    setTaskActivity("");
+    setTaskProgress([]);
     setShowToolTrace(false);
     if (window.zagent.cancelStream) await window.zagent.cancelStream();
   }
@@ -338,6 +440,9 @@ function App() {
           : { name: "context_pin", arguments: { event_ids: [item.event_id], rationale: "用户手动固定" } }
       });
       await refreshActive(activeId);
+      setNotice(pinned
+        ? "已取消固定：该事件之后可随会话增长退出工作集。"
+        : "已固定为证据：它会跨最近窗口和归档持续发送给模型，除非超过模型硬上限。");
     } catch (reason) {
       setError(friendlyError(reason));
     }
@@ -370,6 +475,9 @@ function App() {
   const ratio = budget > 0 ? (context?.working_set.tokens || 0) / budget * 100 : 0;
   const ratioText = ratio > 0 && ratio < 1 ? ratio.toFixed(2) : String(Math.round(ratio));
   const pinnedIds = new Set(context?.working_set.pinned_event_ids || []);
+  const droppedPinnedIds = new Set(context?.working_set.dropped_pinned_ids || []);
+  const activeTaskRunning = busy && runningSessionId === activeId;
+  const blockedByOtherTask = busy && !activeTaskRunning;
   const softRatioPct = budget > 0 && softLimit > 0 ? softLimit / budget * 100 : 0;
   const activeWorkspace = workspaces.find((item) => item.workspace_id === activeWorkspaceId);
   const isToolTrace = (item: Event) => item.kind === "assistant_tool_calls" || item.role === "tool";
@@ -388,19 +496,20 @@ function App() {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark">Z</span><div><strong>Z-Agent</strong><small>中文长程智能体</small></div></div>
       <div className="workspace-bar">
-        <select className="workspace-switcher" value={activeWorkspaceId || ""} onChange={(event) => switchWorkspace(event.target.value)} title="工作区 = agent 的安全边界（可访问目录）" aria-label="切换工作区">
+        <select className="workspace-switcher" disabled={busy} value={activeWorkspaceId || ""} onChange={(event) => switchWorkspace(event.target.value)} title="工作区 = agent 的安全边界（可访问目录）" aria-label="切换工作区">
           {workspaces.map((item) => <option key={item.workspace_id} value={item.workspace_id}>{item.name}{item.path ? ` · ${item.path}` : " · 未设置路径"}</option>)}
         </select>
-        <button className="workspace-add" onClick={() => setWorkspaceDialogOpen(true)} title="新建工作区" aria-label="新建工作区">＋</button>
-        <button className="workspace-edit" disabled={!activeWorkspace} onClick={() => setWorkspaceEditOpen(true)} title="编辑当前工作区的名称与路径" aria-label="编辑当前工作区">✎</button>
+        <button className="workspace-add" disabled={busy} onClick={() => setWorkspaceDialogOpen(true)} title="新建工作区" aria-label="新建工作区">＋</button>
+        <button className="workspace-edit" disabled={!activeWorkspace || busy} onClick={() => setWorkspaceEditOpen(true)} title="编辑当前工作区的名称与路径" aria-label="编辑当前工作区">✎</button>
       </div>
-      <button className="new-task" onClick={createSession}>＋ 新建对话</button>
+      <button className="new-task" disabled={busy} onClick={createSession}>＋ 新建对话</button>
       <div className="section-label">最近任务</div>
       <nav className="session-list" aria-label="最近任务">{sessions.map((session) =>
         <button key={session.session_id} className={activeId === session.session_id ? "session active" : "session"} onClick={() => selectSession(session.session_id)}>
-          <span>{session.title}</span><small>{session.event_count} 个事件 · {formatRelativeTime(session.updated_at)}</small>
+          <span>{session.title}{busy && runningSessionId === session.session_id && <i className="session-spinner" aria-label="正在执行" />}</span><small>{busy && runningSessionId === session.session_id ? taskActivity || "正在执行任务" : `${session.event_count} 个事件 · ${formatRelativeTime(session.updated_at)}`}</small>
         </button>)}</nav>
       <div className="sidebar-actions">
+        <button disabled={!activeId} onClick={() => setMemoriesOpen(true)}>长期记忆{context?.memory_stats?.candidates ? ` · ${context.memory_stats.candidates} 待确认` : ""}</button>
         <button onClick={openExtensions}>扩展与 MCP</button>
         <button onClick={() => setSettingsOpen(true)}>模型设置</button>
       </div>
@@ -438,22 +547,23 @@ function App() {
         </div>}
         {!visibleEvents.length && <div className="empty-state"><div className="orb">Z</div><h1>从一个清晰的目标开始</h1><p>我会在工作区安全边界内阅读最新代码、调用工具并保留可追踪的上下文。</p><div className="empty-chips"><span>中文优先</span><span>代码可修改</span><span>敏感文件隔离</span></div></div>}
         {visibleEvents.map((item) => <EventCard key={item.event_id} item={item} pinned={pinnedIds.has(item.event_id)} onTogglePin={togglePin} showPin={!!context} showToolTrace={showToolTrace} />)}
-        {busy && streaming && streaming.sessionId === activeId && <article className="event assistant streaming-bubble">
+        {activeTaskRunning && <div className="thinking task-running" role="status"><div className="thinking-current"><i></i><i></i><i></i><span>{taskActivity || "正在分析任务"}</span></div>{taskProgress.length > 1 && <ol className="task-progress">{taskProgress.map((item, index) => <li key={`${index}-${item}`}>{item}</li>)}</ol>}</div>}
+        {activeTaskRunning && streaming && streaming.sessionId === activeId && <article className="event assistant streaming-bubble">
           <div className="event-meta"><span>Z-Agent</span><code>正在输出…</code></div>
           <Markdown text={streaming.text || "…"} />
           <span className="streaming-caret" />
         </article>}
-        {busy && !streaming && <div className="thinking" role="status"><i></i><i></i><i></i><span>正在思考；完成后可手动展开</span></div>}
       </section>
       {context?.latest_checkpoint && <div className="recovery-banner" role="status">
         <div><strong>任务已安全暂停</strong><span>{context.latest_checkpoint.reason === "max_tool_rounds" ? "已达本轮工具上限" : "已达本轮时间上限"}，进度已写入 {context.latest_checkpoint.checkpoint_id.slice(-12)}。</span></div>
         <button type="button" onClick={resumeTask} disabled={busy}>继续任务</button>
       </div>}
       {error && <div className="error-banner" role="alert"><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="关闭错误提示">×</button></div>}
+      {notice && <div className="notice-banner" role="status"><span>{notice}</span><button type="button" onClick={() => setNotice("")} aria-label="关闭提示">×</button></div>}
       <div className="composer-dock"><form className="composer" onSubmit={send}>
-        <textarea value={input} onChange={(event) => setInput(event.target.value)} placeholder={activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
-        <button type={busy ? "button" : "submit"} className={`send-button${busy ? " stop" : ""}`} disabled={!busy && !input.trim()} aria-label={busy ? "停止生成" : "发送消息"} title={busy ? "停止生成" : "发送"} onClick={busy ? stopGeneration : undefined}>{busy ? "■" : "↑"}</button>
-      </form><small>Enter 发送 · Shift+Enter 换行 · 文件修改会校验最新版本</small></div>
+        <textarea disabled={blockedByOtherTask} value={input} onChange={(event) => setInput(event.target.value)} placeholder={blockedByOtherTask ? "另一对话正在执行任务；可点击左侧加载项返回查看" : activeWorkspace?.path ? "描述任务，或让 Z-Agent 阅读并修改当前项目…" : "描述你的任务；如需处理代码，请先设置工作区"} aria-label="任务输入" onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} />
+        <button type={activeTaskRunning ? "button" : "submit"} className={`send-button${activeTaskRunning ? " stop" : ""}`} disabled={blockedByOtherTask || (!activeTaskRunning && !input.trim())} aria-label={activeTaskRunning ? "停止生成" : blockedByOtherTask ? "另一对话正在执行" : "发送消息"} title={activeTaskRunning ? "停止生成" : blockedByOtherTask ? "另一对话正在执行" : "发送"} onClick={activeTaskRunning ? stopGeneration : undefined}>{activeTaskRunning ? "■" : "↑"}</button>
+      </form><small>{blockedByOtherTask ? "当前运行中的对话已在左侧标记；同一窗口暂不并发执行任务" : "Enter 发送 · Shift+Enter 换行 · 文件修改会校验最新版本"}</small></div>
     </main>
 
     {inspectorOpen && <button className="inspector-scrim" type="button" onClick={() => setInspectorOpen(false)} aria-label="关闭上下文检查器" />}
@@ -467,6 +577,7 @@ function App() {
           <i className="meter-fill" style={{ width: ratio > 0 ? `max(${ratio}%, 4px)` : "0%" }} />
         </div>
         <small>已使用 {ratioText}% · 软上限 {Math.round((config?.model.soft_limit_ratio || 0) * 100)}%（{softLimit.toLocaleString()} tokens）{context?.working_set.pinned_tokens ? ` · 固定 ${context.working_set.pinned_tokens.toLocaleString()}` : ""}</small>
+        <p className="context-explain">预算是安全上限，不是填充目标；系统只发送相关的最近事件（当前上限 {config?.recent_event_limit || 96}）和固定证据，避免用无关历史增加延迟与费用。</p>
       </div>
       <div className="stat-grid">
         <div title="事件 = 会话中的每一条记录：你的消息、模型回复、工具调用与结果、归档摘要等"><strong>{context?.stats.count || 0}</strong><span>事件</span></div>
@@ -475,18 +586,27 @@ function App() {
         <div title={`生成速度 = 完成任务生成的总 token 数 ÷ 总耗时（最近一次任务）`}><strong>{lastStats ? lastStats.tokens_per_second.toFixed(1) : "—"}</strong><span>tok/s</span></div>
       </div>
       {lastStats && <div className="inspector-section"><h3>最近任务</h3><p>{lastStats.total_tokens.toLocaleString()} tokens · 生成 {lastStats.completion_tokens.toLocaleString()} · 缓存 {lastStats.cache_hit_tokens.toLocaleString()}/{lastStats.cache_miss_tokens.toLocaleString()} · 耗时 {lastStats.elapsed_seconds.toFixed(1)}s</p></div>}
-      <div className="inspector-section"><h3>当前工作集</h3>
-        {context?.working_set.included_event_ids.length ? context.working_set.included_event_ids.slice(-10).reverse().map((id) => {
+      <div className="inspector-section"><h3>固定证据（持续保留）</h3>
+        <p className="context-explain">固定后会跨最近窗口和归档继续进入模型上下文；只有取消固定、工具轮不完整或超过模型真实硬上限时才会退出。</p>
+        {context?.working_set.pinned_event_ids.length ? context.working_set.pinned_event_ids.map((id) => {
           const event = events.find((item) => item.event_id === id);
-          const pinned = pinnedIds.has(id);
           const preview = event ? eventPreview(event).replace(/\s+/g, " ").slice(0, 42) : "";
-          return <div key={id} className="ws-item">
-            <span className={`ws-dot ${pinned ? "pinned" : ""}`} title={pinned ? "已固定为证据" : "普通事件"}>{pinned ? "●" : "·"}</span>
+          const dropped = droppedPinnedIds.has(id);
+          return <div key={id} className={`ws-item${dropped ? " dropped" : ""}`}>
+            <span className="ws-dot pinned" title={dropped ? "已固定但因硬上限未进入本轮" : "已固定并进入本轮上下文"}>●</span>
             <code>{id.slice(-12)}</code>
-            {preview && <span className="ws-preview">{preview}</span>}
-            {pinned && event && <button className="ws-unpin" onClick={() => togglePin(event)} title="取消固定（点击后该事件可被预算清理）">取消</button>}
+            <span className="ws-preview">{dropped ? "超过硬上限，本轮未包含" : preview || "较早事件（仍持续发送）"}</span>
+            {event && <button className="ws-unpin" onClick={() => togglePin(event)} title="取消固定（点击后该事件可被预算清理）">取消</button>}
           </div>;
-        }) : <p>暂无事件</p>}
+        }) : <p>暂无固定证据。可在消息底部点击“固定”。</p>}
+      </div>
+      <div className="inspector-section"><h3>最近工作集</h3>
+        <p className="context-explain">模型本轮实际收到 {context?.working_set.included_event_ids.length || 0} 个事件；下方只预览最近 10 条普通事件，固定证据已在上方单独列出。</p>
+        {context?.working_set.included_event_ids.some((id) => !pinnedIds.has(id)) ? context.working_set.included_event_ids.filter((id) => !pinnedIds.has(id)).slice(-10).reverse().map((id) => {
+          const event = events.find((item) => item.event_id === id);
+          const preview = event ? eventPreview(event).replace(/\s+/g, " ").slice(0, 42) : "";
+          return <div key={id} className="ws-item"><span className="ws-dot" title="普通最近事件">·</span><code>{id.slice(-12)}</code>{preview && <span className="ws-preview">{preview}</span>}</div>;
+        }) : <p>暂无普通事件</p>}
       </div>
       <div className="inspector-section"><h3>最近归档</h3>{context?.latest_archive
         ? <div className="archive-card">
@@ -512,17 +632,65 @@ function App() {
       onClose={() => setExtensionsOpen(false)}
       onChange={(ext, mcp) => { setExtensions(ext); setMcpServers(mcp); }}
       onError={setError} />}
+    {memoriesOpen && activeId && <MemoryModal sessionId={activeId}
+      onClose={() => setMemoriesOpen(false)} onError={setError} />}
+    {pendingPermission && <PermissionDialog request={pendingPermission}
+      busy={permissionDecisionBusy}
+      onDecision={decideActivePermission} />}
+  </div>;
+}
+
+function permissionSubjectLabel(request: PermissionRequest) {
+  if (request.subject_type === "runner") return `运行测试 ${request.subject_id}`;
+  if (request.subject_type === "mcp") return `调用 MCP ${request.subject_id}`;
+  if (request.subject_type === "extension") return `调用扩展 ${request.subject_id}`;
+  return `${request.subject_type} ${request.subject_id}`;
+}
+
+function PermissionDialog({ request, busy, onDecision }: {
+  request: PermissionRequest;
+  busy: boolean;
+  onDecision(decision: "approved" | "denied", scope: "once" | "session"): void;
+}) {
+  const command = Array.isArray(request.details.command_template)
+    ? request.details.command_template.map(String).join(" ")
+    : "";
+  const network = request.details.network === true;
+  return <div className="permission-backdrop">
+    <section className="permission-dialog" role="alertdialog" aria-modal="true" aria-label="需要批准">
+      <header><span className="permission-icon">!</span><div><h2>需要批准</h2><p>Z-Agent 想要执行一个受保护操作</p></div></header>
+      <div className="permission-body">
+        <strong>{permissionSubjectLabel(request)}</strong>
+        {command && <div className="permission-command"><span>将运行</span><code>{command}</code></div>}
+        <dl>
+          <div><dt>范围</dt><dd>{request.session_id ? "当前对话" : "应用级"}</dd></div>
+          <div><dt>网络</dt><dd>{network ? "允许" : "禁止"}</dd></div>
+          {request.subject_type === "runner" && <div><dt>文件</dt><dd>去敏只读快照</dd></div>}
+        </dl>
+        <p>批准后将继续当前工具调用；拒绝会把结果返回给 Agent。测试命令不能由模型任意修改。</p>
+      </div>
+      <footer>
+        <button type="button" className="btn-ghost" disabled={busy} onClick={() => onDecision("denied", "once")}>拒绝</button>
+        <button type="button" className="btn-ghost" disabled={busy || !request.session_id} onClick={() => onDecision("approved", "session")}>本次对话允许</button>
+        <button type="button" className="permission-approve" disabled={busy} onClick={() => onDecision("approved", "once")}>{busy ? "处理中…" : "仅此一次"}</button>
+      </footer>
+    </section>
   </div>;
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose(): void; children: ReactNode }) {
+  const modalRef = useRef<HTMLElement>(null);
   useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]');
+      if (dialogs.item(dialogs.length - 1) === modalRef.current) onClose();
+    };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
-    <section className="modal" role="dialog" aria-modal="true" aria-label={title}>
+    <section ref={modalRef} className="modal" role="dialog" aria-modal="true" aria-label={title}>
       <header><h2>{title}</h2><button type="button" onClick={onClose} aria-label={`关闭${title}`}>×</button></header>
       <div className="modal-content">{children}</div>
     </section>
@@ -627,6 +795,227 @@ function ConfirmDialog({ message, confirmText, onCancel, onConfirm }: {
     <p className="confirm-message">{message}</p>
     <div className="form-actions"><button onClick={onCancel}>取消</button><button className="btn-danger-solid" onClick={onConfirm}>{confirmText || "确认"}</button></div>
   </Modal>;
+}
+
+function memoryTypeLabel(type: MemoryItem["memory_type"]) {
+  return type === "semantic" ? "事实" : type === "procedural" ? "做法" : "经历";
+}
+
+function MemoryModal({ sessionId, onClose, onError }: {
+  sessionId: string; onClose(): void; onError(message: string): void;
+}) {
+  const [memories, setMemories] = useState<MemoryItem[]>([]);
+  const [results, setResults] = useState<MemorySearchResult[] | null>(null);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busyId, setBusyId] = useState<string>();
+  const [confirmDelete, setConfirmDelete] = useState<MemoryItem | null>(null);
+  const [correcting, setCorrecting] = useState<MemoryItem | null>(null);
+  const [correctionContent, setCorrectionContent] = useState("");
+  const [audits, setAudits] = useState<Record<string, MemoryAudit[]>>({});
+  const [error, setError] = useState("");
+  const [exportedPath, setExportedPath] = useState("");
+  const requestGeneration = useRef(0);
+
+  const fail = useCallback((reason: unknown) => {
+    const message = friendlyError(reason);
+    setError(message);
+    onError(message);
+  }, [onError]);
+
+  const refresh = useCallback(async () => {
+    const generation = ++requestGeneration.current;
+    setLoading(true);
+    try {
+      const response = await api<{ memories: MemoryItem[] }>(
+        `/v1/sessions/${sessionId}/memories?include_candidates=true&limit=100`
+      );
+      if (generation !== requestGeneration.current) return;
+      setMemories(response.memories);
+      setResults(null);
+    } finally {
+      if (generation === requestGeneration.current) setLoading(false);
+    }
+  }, [sessionId]);
+
+  useEffect(() => {
+    refresh().catch(fail);
+    return () => { requestGeneration.current += 1; };
+  }, [refresh, fail]);
+
+  async function search(event: FormEvent) {
+    event.preventDefault();
+    const clean = query.trim();
+    if (!clean) { await refresh(); return; }
+    const generation = ++requestGeneration.current;
+    setLoading(true); setError("");
+    try {
+      const response = await api<{ results: MemorySearchResult[] }>(
+        `/v1/sessions/${sessionId}/memories?query=${encodeURIComponent(clean)}&limit=20`
+      );
+      if (generation !== requestGeneration.current) return;
+      setResults(response.results);
+    } catch (reason) {
+      if (generation === requestGeneration.current) fail(reason);
+    }
+    finally {
+      if (generation === requestGeneration.current) setLoading(false);
+    }
+  }
+
+  async function confirm(memory: MemoryItem) {
+    setBusyId(memory.memory_id); setError("");
+    try {
+      await api(`/v1/sessions/${sessionId}/memories/${memory.memory_id}/confirm`, {
+        method: "POST",
+        body: memory.conflict_memory_id ? { supersedes_memory_id: memory.conflict_memory_id } : {},
+      });
+      await refresh();
+    } catch (reason) {
+      fail(reason);
+      await refresh().catch(fail);
+    }
+    finally { setBusyId(undefined); }
+  }
+
+  async function removeConfirmed() {
+    const memory = confirmDelete;
+    if (!memory) return;
+    setConfirmDelete(null); setBusyId(memory.memory_id); setError("");
+    try {
+      await api(`/v1/sessions/${sessionId}/memories/${memory.memory_id}`, {
+        method: "DELETE", body: { reason: "用户在长期记忆管理界面中删除" },
+      });
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusyId(undefined); }
+  }
+
+  async function togglePinned(memory: MemoryItem) {
+    setBusyId(memory.memory_id); setError("");
+    try {
+      await api(`/v1/sessions/${sessionId}/memories/${memory.memory_id}`, {
+        method: "PATCH",
+        body: { pinned: !memory.pinned, expected_pinned: memory.pinned },
+      });
+      await refresh();
+    } catch (reason) {
+      fail(reason);
+      await refresh().catch(fail);
+    }
+    finally { setBusyId(undefined); }
+  }
+
+  async function exportMemories() {
+    if (!window.zagent.saveJson) {
+      fail(new Error("记忆导出需要 Electron 桌面端"));
+      return;
+    }
+    setBusyId("export"); setError(""); setExportedPath("");
+    try {
+      const payload = await api<MemoryExport>(`/v1/sessions/${sessionId}/memories/export`);
+      const day = new Date().toISOString().slice(0, 10);
+      const saved = await window.zagent.saveJson(
+        `zagent-memories-${day}.json`,
+        `${JSON.stringify(payload, null, 2)}\n`,
+      );
+      if (saved) setExportedPath(saved);
+    } catch (reason) { fail(reason); }
+    finally { setBusyId(undefined); }
+  }
+
+  async function saveCorrection(event: FormEvent) {
+    event.preventDefault();
+    const memory = correcting;
+    const content = correctionContent.trim();
+    if (!memory || !content || content === memory.content) return;
+    setBusyId(memory.memory_id); setError("");
+    try {
+      await api(`/v1/sessions/${sessionId}/memories/${memory.memory_id}/correct`, {
+        method: "POST",
+        body: { content, reason: "用户在长期记忆管理界面中纠正" },
+      });
+      setCorrecting(null);
+      setCorrectionContent("");
+      await refresh();
+    } catch (reason) { fail(reason); }
+    finally { setBusyId(undefined); }
+  }
+
+  async function loadAudit(memoryId: string) {
+    if (audits[memoryId]) {
+      setAudits((current) => { const next = { ...current }; delete next[memoryId]; return next; });
+      return;
+    }
+    setBusyId(memoryId); setError("");
+    try {
+      const response = await api<{ audit: MemoryAudit[] }>(
+        `/v1/sessions/${sessionId}/memories/${memoryId}/audit?limit=50`
+      );
+      setAudits((current) => ({ ...current, [memoryId]: response.audit }));
+    } catch (reason) { fail(reason); }
+    finally { setBusyId(undefined); }
+  }
+
+  const operationBusy = busyId !== undefined;
+  const displayed = results ? results.map((item) => item.memory) : memories;
+  const resultById = new Map((results || []).map((item) => [item.memory.memory_id, item]));
+  return <Modal title="长期记忆" onClose={onClose}><div className="memory-manager">
+    <p className="settings-hint">成功写入或修改工作区文件并完成回复后，会自动生成“待确认”任务记忆；普通聊天、只读分析、失败或取消不触发。候选不会进入模型上下文，由你确认后才会跨会话召回。更新前已完成的任务不会自动追溯生成。</p>
+    <form className="memory-search" onSubmit={search}>
+      <input value={query} disabled={operationBusy} onChange={(event) => setQuery(event.target.value)} placeholder="搜索事实、偏好或工作方法" aria-label="搜索长期记忆" autoFocus />
+      <button disabled={loading || operationBusy}>搜索</button>
+      {results && <button type="button" className="btn-ghost" disabled={operationBusy} onClick={() => { setQuery(""); refresh().catch(fail); }}>清除</button>}
+    </form>
+    {error && <div className="settings-error" role="alert">{error}</div>}
+    <div className="memory-summary">
+      <span>{results ? `找到 ${displayed.length} 条` : `${memories.filter((item) => item.status === "active").length} 条生效 · ${memories.filter((item) => item.status === "candidate").length} 条待确认`}</span>
+      <small>用户级记忆跨工作区；工作区级记忆只在当前项目内使用</small>
+      <button type="button" className="btn-ghost" disabled={operationBusy || loading} onClick={exportMemories}>导出 JSON</button>
+    </div>
+    {exportedPath && <div className="memory-exported" role="status">已导出到 <code>{exportedPath}</code></div>}
+    <div className="memory-list">
+      {loading && <div className="memory-empty">正在读取记忆…</div>}
+      {!loading && !displayed.length && <div className="memory-empty">{results ? "没有相关记忆" : "尚未形成长期记忆"}</div>}
+      {!loading && displayed.map((memory) => {
+        const explanation = resultById.get(memory.memory_id);
+        return <article className={`memory-card ${memory.status}`} key={memory.memory_id}>
+          <div className="memory-head"><div className="memory-badges">
+            <span>{memory.status === "active" ? "已生效" : "待确认"}</span>
+            <span>{memoryTypeLabel(memory.memory_type)}</span>
+            <span>{memory.scope_type === "user" ? "用户级" : "工作区级"}</span>
+            {memory.pinned && <span>固定</span>}
+          </div><code>{memory.memory_id.slice(-8)}</code></div>
+          <h3>{memory.memory_key}</h3>
+          <p className="memory-content">{memory.content}</p>
+          {memory.conflict_memory_id && <p className="memory-conflict">确认后将替换同名旧记忆 {memory.conflict_memory_id.slice(-8)}</p>}
+          {explanation && <p className="memory-match">召回：{explanation.exact_match ? "精确命中" : explanation.channels.join(" + ") || "排序命中"}
+            {explanation.matched_terms.length ? ` · 匹配 ${explanation.matched_terms.slice(0, 8).join("、")}` : ""}
+            {explanation.sparse_query_coverage != null ? ` · 覆盖 ${Math.round(explanation.sparse_query_coverage * 100)}%` : ""}</p>}
+          <div className="memory-meta"><span>可信度 {Math.round(memory.confidence * 100)}%</span><span>证据 {memory.source_event_ids.length} 条</span><span>核验于 {formatRelativeTime(memory.last_verified_at)}</span></div>
+          {audits[memory.memory_id] && <div className="memory-audit" aria-label={`${memory.memory_key} 审计记录`}>
+            {audits[memory.memory_id].map((entry) => <div key={entry.audit_id}><span>{entry.action}</span><small>{formatRelativeTime(entry.created_at)}</small><code>{entry.content_sha256.slice(0, 12)}</code></div>)}
+          </div>}
+          <div className="memory-actions">
+            <button className="btn-ghost" disabled={operationBusy} onClick={() => loadAudit(memory.memory_id)}>{audits[memory.memory_id] ? "收起审计" : "查看审计"}</button>
+            {memory.status === "active" && <button className="btn-ghost" disabled={operationBusy} onClick={() => togglePinned(memory)}>{memory.pinned ? "取消固定" : "固定"}</button>}
+            {memory.status === "active" && <button className="btn-ghost" disabled={operationBusy} onClick={() => { setCorrecting(memory); setCorrectionContent(memory.content); }}>纠正</button>}
+            {memory.status === "candidate" && <button disabled={operationBusy} onClick={() => confirm(memory)}>{memory.conflict_memory_id ? "确认并替换" : "确认生效"}</button>}
+            <button className="btn-danger" disabled={operationBusy} onClick={() => setConfirmDelete(memory)}>删除</button>
+          </div>
+        </article>;
+      })}
+    </div>
+    {confirmDelete && <ConfirmDialog message={`删除长期记忆「${confirmDelete.memory_key}」？原文会被清空，并保留不可召回的审计墓碑。`} confirmText="确认删除"
+      onCancel={() => setConfirmDelete(null)} onConfirm={removeConfirmed} />}
+    {correcting && <Modal title="纠正长期记忆" onClose={() => { if (!operationBusy) setCorrecting(null); }}>
+      <form className="settings" onSubmit={saveCorrection}>
+        <p className="settings-hint">旧记忆不会被原地改写；系统会保留它的审计链，并用新版本显式替代。</p>
+        <label>记忆正文<textarea aria-label="纠正后的记忆正文" value={correctionContent} onChange={(event) => setCorrectionContent(event.target.value)} rows={6} autoFocus /></label>
+        <div className="form-actions"><button type="button" disabled={operationBusy} onClick={() => setCorrecting(null)}>取消</button><button disabled={operationBusy || !correctionContent.trim() || correctionContent.trim() === correcting.content}>保存并替换</button></div>
+      </form>
+    </Modal>}
+  </div></Modal>;
 }
 
 function EditWorkspaceModal({ workspace, onClose, onSaved }: {

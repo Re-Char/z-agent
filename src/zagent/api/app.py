@@ -26,6 +26,7 @@ from .schemas import (
     CallMcpToolRequest,
     CompleteMcpOAuthRequest,
     ConfirmMemoryRequest,
+    CorrectMemoryRequest,
     CreateExtensionRequest,
     CreateMemoryRequest,
     CreateSessionRequest,
@@ -39,6 +40,7 @@ from .schemas import (
     SendMessageRequest,
     UpdateExtensionRequest,
     UpdateMcpServerRequest,
+    UpdateMemoryRequest,
     UpdateModelRequest,
     UpdateWorkspaceRequest,
 )
@@ -155,9 +157,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         return {"events": [event.to_dict() for event in events if event.sensitivity != "internal"]}
 
     @app.post("/v1/sessions/{session_id}/messages", dependencies=protected)
-    def send_message(
-        session_id: str, body: SendMessageRequest, core: CoreDependency
-    ) -> dict:
+    def send_message(session_id: str, body: SendMessageRequest, core: CoreDependency) -> dict:
         if body.expected_context_version is None:
             return core.agent.send(session_id, body.content).to_dict()
         return core.agent.send(session_id, body.content, body.expected_context_version).to_dict()
@@ -169,9 +169,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
                 stream = (
                     core.agent.send_stream(session_id, body.content)
                     if body.expected_context_version is None
-                    else core.agent.send_stream(
-                        session_id, body.content, body.expected_context_version
-                    )
+                    else core.agent.send_stream(session_id, body.content, body.expected_context_version)
                 )
                 for event in stream:
                     yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
@@ -192,9 +190,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         return core.context.execute(session_id, "context_status", {})
 
     @app.post("/v1/sessions/{session_id}/context/tools", dependencies=protected)
-    def execute_context_tool(
-        session_id: str, body: ExecuteContextToolRequest, core: CoreDependency
-    ) -> dict:
+    def execute_context_tool(session_id: str, body: ExecuteContextToolRequest, core: CoreDependency) -> dict:
         return core.context.execute(session_id, body.name, body.arguments)
 
     @app.get("/v1/sessions/{session_id}/memories", dependencies=protected)
@@ -207,21 +203,19 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
     ) -> dict:
         if query.strip():
             return {"results": core.memory.search(session_id, query, min(limit, 20))}
-        return {
-            "memories": core.memory.list(
-                session_id, include_candidates=include_candidates, limit=limit
-            )
-        }
+        return {"memories": core.memory.list(session_id, include_candidates=include_candidates, limit=limit)}
+
+    @app.get("/v1/sessions/{session_id}/memories/export", dependencies=protected)
+    def export_memories(session_id: str, core: CoreDependency) -> dict:
+        return core.memory.export(session_id)
 
     @app.post(
         "/v1/sessions/{session_id}/memories",
         status_code=status.HTTP_201_CREATED,
         dependencies=protected,
     )
-    def create_memory(
-        session_id: str, body: CreateMemoryRequest, core: CoreDependency
-    ) -> dict:
-        return core.memory.remember(session_id, **body.model_dump())
+    def create_memory(session_id: str, body: CreateMemoryRequest, core: CoreDependency) -> dict:
+        return core.memory.remember(session_id, **body.model_dump(), user_action=True)
 
     @app.post("/v1/sessions/{session_id}/memories/{memory_id}/confirm", dependencies=protected)
     def confirm_memory(
@@ -230,7 +224,41 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         body: ConfirmMemoryRequest,
         core: CoreDependency,
     ) -> dict:
-        return core.memory.confirm(session_id, memory_id, body.supersedes_memory_id)
+        return core.memory.confirm(session_id, memory_id, body.supersedes_memory_id, user_action=True)
+
+    @app.get("/v1/sessions/{session_id}/memories/{memory_id}/audit", dependencies=protected)
+    def memory_audit(
+        session_id: str,
+        memory_id: str,
+        core: CoreDependency,
+        limit: int = Query(default=100, ge=1, le=500),
+    ) -> dict:
+        return {"audit": core.memory.audit(session_id, memory_id, limit)}
+
+    @app.patch("/v1/sessions/{session_id}/memories/{memory_id}", dependencies=protected)
+    def update_memory(
+        session_id: str,
+        memory_id: str,
+        body: UpdateMemoryRequest,
+        core: CoreDependency,
+    ) -> dict:
+        return {
+            "memory": core.memory.set_pinned(
+                session_id,
+                memory_id,
+                body.pinned,
+                expected_pinned=body.expected_pinned,
+            )
+        }
+
+    @app.post("/v1/sessions/{session_id}/memories/{memory_id}/correct", dependencies=protected)
+    def correct_memory(
+        session_id: str,
+        memory_id: str,
+        body: CorrectMemoryRequest,
+        core: CoreDependency,
+    ) -> dict:
+        return core.memory.correct(session_id, memory_id, body.content, body.reason)
 
     @app.delete("/v1/sessions/{session_id}/memories/{memory_id}", dependencies=protected)
     def forget_memory(
@@ -239,7 +267,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         body: ForgetMemoryRequest,
         core: CoreDependency,
     ) -> dict:
-        return core.memory.forget(session_id, memory_id, body.reason)
+        return core.memory.forget(session_id, memory_id, body.reason, user_action=True)
 
     @app.get("/v1/extensions", dependencies=protected)
     def list_extensions(core: CoreDependency) -> dict:
@@ -257,9 +285,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         return {"extension": extension.to_dict()}
 
     @app.patch("/v1/extensions/{extension_id}", dependencies=protected)
-    def update_extension(
-        extension_id: str, body: UpdateExtensionRequest, core: CoreDependency
-    ) -> dict:
+    def update_extension(extension_id: str, body: UpdateExtensionRequest, core: CoreDependency) -> dict:
         return {"extension": core.extensions.set_enabled(extension_id, body.enabled).to_dict()}
 
     @app.delete("/v1/extensions/{extension_id}", dependencies=protected)
@@ -273,9 +299,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         return core.extension_hosts.status(extension_id)
 
     @app.post("/v1/extensions/{extension_id}/host/connect", dependencies=protected)
-    def connect_extension_host(
-        extension_id: str, body: ExtensionHostRequest, core: CoreDependency
-    ) -> dict:
+    def connect_extension_host(extension_id: str, body: ExtensionHostRequest, core: CoreDependency) -> dict:
         return core.extension_hosts.connect(extension_id, body.session_id)
 
     @app.post("/v1/extensions/{extension_id}/host/disconnect", dependencies=protected)
@@ -310,9 +334,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
                 {"extension": extension_id, "tool": tool_name, "source": "api-confirmation"},
             )
         return {
-            "result": core.extension_hosts.call_tool(
-                extension_id, tool_name, body.arguments, body.session_id
-            )
+            "result": core.extension_hosts.call_tool(extension_id, tool_name, body.arguments, body.session_id)
         }
 
     @app.get("/v1/mcp/servers", dependencies=protected)
@@ -339,9 +361,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
 
     @app.patch("/v1/mcp/servers/{name}", dependencies=protected)
     def update_mcp_server(name: str, body: UpdateMcpServerRequest, core: CoreDependency) -> dict:
-        return {
-            "server": core.mcp.set_state(name, enabled=body.enabled, approved=body.approved)
-        }
+        return {"server": core.mcp.set_state(name, enabled=body.enabled, approved=body.approved)}
 
     @app.post("/v1/mcp/servers/{name}/connect", dependencies=protected)
     def connect_mcp_server(name: str, core: CoreDependency) -> dict:
@@ -387,9 +407,7 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         return {"tools": core.mcp.list_tools(name)}
 
     @app.post("/v1/mcp/servers/{name}/tools/{tool_name}/call", dependencies=protected)
-    def call_mcp_tool(
-        name: str, tool_name: str, body: CallMcpToolRequest, core: CoreDependency
-    ) -> dict:
+    def call_mcp_tool(name: str, tool_name: str, body: CallMcpToolRequest, core: CoreDependency) -> dict:
         if body.confirmed:
             core.permissions.approve_inline_once(
                 None,
@@ -423,23 +441,15 @@ def create_api(container: ApplicationContainer, auth_token: Optional[str] = None
         return {"requests": core.store.list_permission_requests(selected)}
 
     @app.post("/v1/permissions/requests/{request_id}/decision", dependencies=protected)
-    def decide_permission(
-        request_id: str, body: DecidePermissionRequest, core: CoreDependency
-    ) -> dict:
-        return {
-            "request": core.store.decide_permission_request(
-                request_id, body.decision, body.scope
-            )
-        }
+    def decide_permission(request_id: str, body: DecidePermissionRequest, core: CoreDependency) -> dict:
+        return {"request": core.store.decide_permission_request(request_id, body.decision, body.scope)}
 
     @app.get("/v1/permissions/grants", dependencies=protected)
     def list_permission_grants(core: CoreDependency) -> dict:
         return {"grants": core.store.list_permission_grants()}
 
     @app.get("/v1/permissions/audit", dependencies=protected)
-    def list_permission_audit(
-        core: CoreDependency, limit: int = Query(default=200, ge=1, le=1000)
-    ) -> dict:
+    def list_permission_audit(core: CoreDependency, limit: int = Query(default=200, ge=1, le=1000)) -> dict:
         return {"audit": core.store.list_permission_audit(limit)}
 
     @app.delete("/v1/permissions/grants/{grant_id}", dependencies=protected)

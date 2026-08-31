@@ -1,7 +1,7 @@
 {
   "name": "z-agent",
   "private": true,
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "中文优先、可审计的长程智能体桌面应用",
   "workspaces": ["apps/*"],
   "scripts": {
@@ -13,7 +13,7 @@
     "env:update": "conda env update --prefix .conda/envs/zagent --file environment.yml --prune",
     "test:core": "PYTHONPATH=src conda run --prefix .conda/envs/zagent pytest --cov=zagent --cov-report=term-missing",
     "lint:core": "conda run --prefix .conda/envs/zagent ruff check src tests",
-    "test": "npm run lint:core && npm run test:core && npm run test -w @zagent/ui && npm run typecheck -w @zagent/ui"
+    "test": "npm run lint:core && npm run test:core && npm run test -w @zagent/desktop && npm run test -w @zagent/ui && npm run typecheck -w @zagent/ui"
   },
   "devDependencies": {
     "concurrently": "^9.2.1",

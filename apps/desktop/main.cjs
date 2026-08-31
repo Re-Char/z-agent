@@ -4,6 +4,8 @@ const { spawn } = require("node:child_process");
 const { existsSync, mkdirSync, writeFileSync } = require("node:fs");
 const path = require("node:path");
 const readline = require("node:readline");
+const { prepareJsonExport } = require("./export.cjs");
+const { consumeSseFrames } = require("./sse.cjs");
 
 let mainWindow;
 let coreProcess;
@@ -292,19 +294,9 @@ ipcMain.handle("core:stream", async (event, request) => {
       const { done, value } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
-      let boundary;
-      while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-        const rawEvent = buffer.slice(0, boundary).trim();
-        buffer = buffer.slice(boundary + 2);
-        if (!rawEvent.startsWith("data:")) continue;
-        const data = rawEvent.slice(5).trim();
-        if (!data) continue;
-        let payload;
-        try {
-          payload = JSON.parse(data);
-        } catch (_) {
-          continue;
-        }
+      const parsed = consumeSseFrames(buffer);
+      buffer = parsed.rest;
+      for (const payload of parsed.events) {
         // Provider reasoning is required internally for some tool-call protocols,
         // but it is never part of the renderer contract or product UI.
         if (payload.type === "reasoning") continue;
@@ -357,6 +349,19 @@ ipcMain.handle("dialog:select-extension", async () => {
   });
   if (result.canceled || !result.filePaths.length) return null;
   return result.filePaths[0];
+});
+
+ipcMain.handle("dialog:save-json", async (_event, request) => {
+  if (!mainWindow) return null;
+  const { content, safeName } = prepareJsonExport(request);
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "导出 Z-Agent 长期记忆",
+    defaultPath: safeName,
+    filters: [{ name: "JSON", extensions: ["json"] }]
+  });
+  if (result.canceled || !result.filePath) return null;
+  writeFileSync(result.filePath, content, { encoding: "utf8", mode: 0o600 });
+  return result.filePath;
 });
 
 app.whenReady().then(async () => {

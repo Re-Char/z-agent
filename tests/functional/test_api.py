@@ -72,6 +72,11 @@ def test_api_long_term_memory_lifecycle_and_cross_session_recall(tmp_path):
             assert created.status_code == 201
             memory_id = created.json()["memory"]["memory_id"]
 
+            audit = client.get(f"/v1/sessions/{first}/memories/{memory_id}/audit", headers=headers)
+            assert audit.status_code == 200
+            assert audit.json()["audit"][0]["action"] == "created"
+            assert audit.json()["audit"][0]["content_sha256"]
+
             recalled = client.get(
                 f"/v1/sessions/{second}/memories",
                 headers=headers,
@@ -79,6 +84,40 @@ def test_api_long_term_memory_lifecycle_and_cross_session_recall(tmp_path):
             )
             assert recalled.status_code == 200
             assert recalled.json()["results"][0]["memory"]["memory_id"] == memory_id
+
+            exported = client.get(
+                f"/v1/sessions/{second}/memories/export",
+                headers=headers,
+            )
+            assert exported.status_code == 200
+            assert exported.json()["schema_version"] == 1
+            assert exported.json()["memories"][0]["memory_id"] == memory_id
+            assert exported.json()["memories"][0]["audit"][0]["action"] == "created"
+
+            unpinned = client.patch(
+                f"/v1/sessions/{second}/memories/{memory_id}",
+                headers=headers,
+                json={"pinned": False, "expected_pinned": True},
+            )
+            assert unpinned.status_code == 200
+            assert unpinned.json()["memory"]["pinned"] is False
+            stale_pin = client.patch(
+                f"/v1/sessions/{second}/memories/{memory_id}",
+                headers=headers,
+                json={"pinned": True, "expected_pinned": True},
+            )
+            assert stale_pin.status_code == 409
+
+            corrected = client.post(
+                f"/v1/sessions/{second}/memories/{memory_id}/correct",
+                headers=headers,
+                json={"content": "部署环境改用腾讯云", "reason": "用户更新部署信息"},
+            )
+            assert corrected.status_code == 200
+            assert corrected.json()["superseded_memory_id"] == memory_id
+            memory_id = corrected.json()["memory"]["memory_id"]
+            assert corrected.json()["memory"]["content"] == "部署环境改用腾讯云"
+            assert corrected.json()["evidence_event_id"] in corrected.json()["memory"]["source_event_ids"]
 
             deleted = client.request(
                 "DELETE",
@@ -88,11 +127,14 @@ def test_api_long_term_memory_lifecycle_and_cross_session_recall(tmp_path):
             )
             assert deleted.status_code == 200
             assert deleted.json()["tombstone"] is True
-            assert client.get(
-                f"/v1/sessions/{second}/memories",
-                headers=headers,
-                params={"query": "华为云"},
-            ).json()["results"] == []
+            assert (
+                client.get(
+                    f"/v1/sessions/{second}/memories",
+                    headers=headers,
+                    params={"query": "华为云"},
+                ).json()["results"]
+                == []
+            )
     finally:
         container.close()
 
@@ -116,10 +158,7 @@ def test_api_rejects_a_stale_context_revision(tmp_path):
             )
             assert stale.status_code == 409
             assert "expected=0" in stale.json()["error"]
-            assert all(
-                event.payload != "过期写入"
-                for event in container.store.list_events(session_id)
-            )
+            assert all(event.payload != "过期写入" for event in container.store.list_events(session_id))
     finally:
         container.close()
 
@@ -177,7 +216,10 @@ def test_api_exposes_reasoning_for_explicit_collapsed_ui_but_hides_internal_even
             },
         )
         container.store.append_event(
-            session["session_id"], "model_raw", "system", {"secret": "raw"},
+            session["session_id"],
+            "model_raw",
+            "system",
+            {"secret": "raw"},
             sensitivity="internal",
         )
         with TestClient(create_api(container, auth_token="test-token")) as client:
@@ -204,10 +246,17 @@ def test_api_model_profiles_crud_and_activate(tmp_path):
             assert len(config["models"]) == 1
             assert config["active_model_id"] == config["models"][0]["id"]
 
-            created = client.post("/v1/models", headers=headers, json={
-                "name": "DeepSeek", "provider": "deepseek", "model": "deepseek-v4-flash",
-                "base_url": "https://api.deepseek.com", "context_window": 1000000,
-            })
+            created = client.post(
+                "/v1/models",
+                headers=headers,
+                json={
+                    "name": "DeepSeek",
+                    "provider": "deepseek",
+                    "model": "deepseek-v4-flash",
+                    "base_url": "https://api.deepseek.com",
+                    "context_window": 1000000,
+                },
+            )
             assert created.status_code == 201
             body = created.json()
             assert len(body["models"]) == 2
@@ -237,25 +286,37 @@ def test_api_model_profiles_crud_and_activate(tmp_path):
         container.close()
 
 
-
 def test_api_extension_and_mcp_management(tmp_path):
     container = ApplicationContainer(str(tmp_path / "data"), str(tmp_path))
     try:
         with TestClient(create_api(container, auth_token="test-token")) as client:
             headers = {"Authorization": "Bearer test-token"}
-            created = client.post("/v1/extensions", headers=headers, json={
-                "id": "com.example.helper", "name": "助手扩展", "runtime": "declarative",
-                "contributes": ["skills"],
-            })
+            created = client.post(
+                "/v1/extensions",
+                headers=headers,
+                json={
+                    "id": "com.example.helper",
+                    "name": "助手扩展",
+                    "runtime": "declarative",
+                    "contributes": ["skills"],
+                },
+            )
             assert created.status_code == 201
             assert created.json()["extension"]["id"] == "com.example.helper"
             assert client.get("/v1/extensions", headers=headers).json()["extensions"][0]["name"] == "助手扩展"
             assert client.delete("/v1/extensions/com.example.helper", headers=headers).status_code == 200
             assert client.delete("/v1/extensions/missing", headers=headers).status_code == 404
 
-            mcp = client.post("/v1/mcp/servers", headers=headers, json={
-                "name": "fs", "transport": "stdio", "command": "npx", "args": ["-y", "filesystem"],
-            })
+            mcp = client.post(
+                "/v1/mcp/servers",
+                headers=headers,
+                json={
+                    "name": "fs",
+                    "transport": "stdio",
+                    "command": "npx",
+                    "args": ["-y", "filesystem"],
+                },
+            )
             assert mcp.status_code == 201
             assert mcp.json()["server"]["command"] == "npx"
             assert client.get("/v1/mcp/servers", headers=headers).json()["servers"][0]["name"] == "fs"
@@ -328,9 +389,9 @@ def test_api_real_extension_import_and_mcp_tool_call(tmp_path):
                 json={"arguments": {"text": "端到端成功"}, "confirmed": True},
             )
             assert called.json()["result"]["structuredContent"]["echo"] == "端到端成功"
-            assert client.post(
-                "/v1/mcp/servers/api-echo/disconnect", headers=headers
-            ).json() == {"disconnected": True}
+            assert client.post("/v1/mcp/servers/api-echo/disconnect", headers=headers).json() == {
+                "disconnected": True
+            }
     finally:
         container.close()
 
@@ -368,9 +429,7 @@ def test_api_permission_broker_decision_grant_audit_and_revoke(tmp_path):
             assert grants[0]["scope"] == "always"
             audit = client.get("/v1/permissions/audit?limit=10", headers=headers).json()["audit"]
             assert {item["outcome"] for item in audit} >= {"pending", "approved"}
-            revoked = client.delete(
-                f"/v1/permissions/grants/{grants[0]['grant_id']}", headers=headers
-            )
+            revoked = client.delete(f"/v1/permissions/grants/{grants[0]['grant_id']}", headers=headers)
             assert revoked.json() == {"ok": True}
             assert client.delete("/v1/permissions/grants/missing", headers=headers).status_code == 404
     finally:
@@ -386,21 +445,32 @@ def test_api_workspace_flow(tmp_path):
             project_path.mkdir()
             workspaces = client.get("/v1/workspaces", headers=headers).json()["workspaces"]
             assert len(workspaces) == 1
-            created = client.post("/v1/workspaces", headers=headers, json={
-                "name": "项目", "path": str(project_path),
-            })
+            created = client.post(
+                "/v1/workspaces",
+                headers=headers,
+                json={
+                    "name": "项目",
+                    "path": str(project_path),
+                },
+            )
             assert created.status_code == 201
             ws_id = created.json()["workspace"]["workspace_id"]
-            session = client.post("/v1/sessions", headers=headers, json={
-                "title": "项目会话", "workspace_id": ws_id,
-            })
+            session = client.post(
+                "/v1/sessions",
+                headers=headers,
+                json={
+                    "title": "项目会话",
+                    "workspace_id": ws_id,
+                },
+            )
             assert session.status_code == 201
             assert session.json()["workspace_id"] == ws_id
             listed = client.get(f"/v1/sessions?workspace_id={ws_id}", headers=headers).json()["sessions"]
             assert [item["title"] for item in listed] == ["项目会话"]
             assert client.get("/v1/workspaces", headers=headers).json()["workspaces"][1]["name"] == "项目"
             rejected = client.patch(
-                f"/v1/workspaces/{ws_id}", headers=headers,
+                f"/v1/workspaces/{ws_id}",
+                headers=headers,
                 json={"path": str(tmp_path / "missing")},
             )
             assert rejected.status_code == 400

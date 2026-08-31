@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -19,7 +20,14 @@ def test_os_sandbox_executes_or_fails_closed(tmp_path):
             launcher.wrap(sys.executable, ["-c", "print('ok')"], policy)
         return
     command = launcher.wrap(sys.executable, ["-c", "print('sandbox-ok')"], policy)
-    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=5)
+    result = subprocess.run(
+        command,
+        cwd=allowed,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=5,
+    )
     assert result.returncode == 0
     assert result.stdout.strip() == "sandbox-ok"
 
@@ -39,7 +47,16 @@ def test_sandbox_command_generation_and_validation(tmp_path, monkeypatch):
     mac_profile = SandboxLauncher(system="darwin")._macos_profile(sys.executable, policy)
     assert "(deny default)" in mac_profile
     assert "(allow network-outbound)" in mac_profile
+    assert '(allow file-read-data (literal "/"))' in mac_profile
     assert str(write_root) in mac_profile
+    assert "(allow file-map-executable" in mac_profile
+    assert (
+        f'(allow file-map-executable (subpath "{Path(sys.prefix).resolve()}"))'
+        in mac_profile
+    )
+    # Writable project/test data must not become executable merely because the
+    # runner may write temporary files there.
+    assert f'(allow file-map-executable (subpath "{write_root}"))' not in mac_profile
 
     monkeypatch.setattr("zagent.security.sandbox.shutil.which", lambda name: "/usr/bin/bwrap")
     linux = SandboxLauncher(system="linux")

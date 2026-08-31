@@ -17,6 +17,31 @@ from zagent.storage.sqlite_store import SqliteStore
 
 CJK_RUN_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
 
+# High-frequency conversational words should help recall a little, but must
+# not outrank the actual subject (for example "部署" versus "项目").  The
+# list is intentionally small and inspectable instead of being learned from
+# user data.
+LOW_INFORMATION_CJK_TERMS = frozenset(
+    {
+        "一下",
+        "什么",
+        "使用",
+        "哪个",
+        "哪個",
+        "如何",
+        "帮我",
+        "幫我",
+        "怎么",
+        "怎样",
+        "是否",
+        "这个",
+        "那个",
+        "项目",
+        "專案",
+        "专案",
+    }
+)
+
 
 def _event_text(event: EventRecord) -> str:
     if isinstance(event.payload, str):
@@ -42,11 +67,12 @@ def sparse_terms(value: str) -> Counter[str]:
                 if len(component) >= 2:
                     terms[f"p:{component}"] += 0.7
         else:
-            terms[f"w:{token}"] += 1.0
+            terms[f"w:{token}"] += 0.15 if token in LOW_INFORMATION_CJK_TERMS else 1.0
     for run in CJK_RUN_RE.findall(normalized):
         for size, weight in ((2, 1.0), (3, 1.25)):
             for index in range(max(0, len(run) - size + 1)):
-                terms[f"g{size}:{run[index:index + size]}"] += weight
+                gram = run[index : index + size]
+                terms[f"g{size}:{gram}"] += 0.15 if gram in LOW_INFORMATION_CJK_TERMS else weight
     return terms
 
 
@@ -133,13 +159,9 @@ class HybridRetriever:
         limit: int,
     ) -> List[dict]:
         lexical_by_id = {item["event"]["event_id"]: item for item in lexical}
-        lexical_ranks = {
-            item["event"]["event_id"]: rank for rank, item in enumerate(lexical, start=1)
-        }
+        lexical_ranks = {item["event"]["event_id"]: rank for rank, item in enumerate(lexical, start=1)}
         vector_by_id = {event.event_id: (event, similarity) for event, similarity in vector}
-        vector_ranks = {
-            event.event_id: rank for rank, (event, _) in enumerate(vector, start=1)
-        }
+        vector_ranks = {event.event_id: rank for rank, (event, _) in enumerate(vector, start=1)}
         event_ids = list(dict.fromkeys([*lexical_ranks, *vector_ranks]))
         normalized_query = normalize_text(query).casefold()
         results: List[dict] = []
@@ -161,17 +183,19 @@ class HybridRetriever:
                 channels.append("vector")
             if exact:
                 channels.insert(0, "exact")
-            results.append({
-                "event": event.to_dict(),
-                "excerpt": lexical_item["excerpt"] if lexical_item else excerpt(text),
-                "score": lexical_item["score"] if lexical_item else None,
-                "fusion_score": round(fusion_score, 6),
-                "channels": channels,
-                "exact_match": exact,
-                "lexical_rank": lexical_rank,
-                "vector_rank": vector_rank,
-                "vector_similarity": round(vector_item[1], 4) if vector_item else None,
-            })
+            results.append(
+                {
+                    "event": event.to_dict(),
+                    "excerpt": lexical_item["excerpt"] if lexical_item else excerpt(text),
+                    "score": lexical_item["score"] if lexical_item else None,
+                    "fusion_score": round(fusion_score, 6),
+                    "channels": channels,
+                    "exact_match": exact,
+                    "lexical_rank": lexical_rank,
+                    "vector_rank": vector_rank,
+                    "vector_similarity": round(vector_item[1], 4) if vector_item else None,
+                }
+            )
         return sorted(
             results,
             key=lambda item: (

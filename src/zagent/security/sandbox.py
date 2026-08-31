@@ -86,7 +86,8 @@ class SandboxLauncher:
         return tuple(sorted(candidates))
 
     def _macos_profile(self, executable: str, policy: SandboxPolicy) -> str:
-        read_paths = set(self.runtime_read_paths(executable))
+        runtime_paths = set(self.runtime_read_paths(executable))
+        read_paths = set(runtime_paths)
         read_paths.update(policy.read_paths)
         read_paths.update(policy.write_paths)
         rules = [
@@ -98,8 +99,19 @@ class SandboxLauncher:
             "(allow sysctl-read)",
             "(allow mach-lookup)",
             "(allow file-read-metadata)",
+            # macOS 26 dyld probes the root directory itself while locating the
+            # shared cache. This literal rule does not grant recursive access.
+            '(allow file-read-data (literal "/"))',
             '(allow file-write-data (literal "/dev/null"))',
         ]
+        # Seatbelt treats executable mmap as a separate operation from reads.
+        # Without this dyld aborts before Python/Node reaches user code. Keep the
+        # permission limited to the trusted runtime and system library roots;
+        # project snapshots remain non-executable.
+        for path in sorted(runtime_paths):
+            rules.append(
+                f'(allow file-map-executable (subpath "{_escape_profile(path)}"))'
+            )
         for path in sorted(read_paths):
             rules.append(f'(allow file-read* (subpath "{_escape_profile(path)}"))')
         for path in sorted(policy.write_paths):

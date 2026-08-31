@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import App from "./App";
+import "./styles.css";
 
 describe("Z-Agent desktop UI", () => {
   beforeEach(() => {
@@ -77,6 +78,158 @@ describe("Z-Agent desktop UI", () => {
     expect(container.querySelector("code.language-json .hljs-attr")).toHaveTextContent('"path"');
     expect(container.querySelector("code.language-python .hljs-keyword")).toHaveTextContent("def");
     expect(screen.getByRole("button", { name: "复制 src/main.py 代码" })).toBeInTheDocument();
+    const codePre = container.querySelector<HTMLElement>(".code-block pre");
+    expect(codePre).not.toBeNull();
+    expect(getComputedStyle(codePre!).whiteSpace).toBe("pre");
+
+    fireEvent.click(screen.getByRole("button", { name: "隐藏工具记录" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示工具记录" }));
+    (await screen.findAllByRole("button", { name: /fs_read/ })).forEach((button) => fireEvent.click(button));
+    expect(container.querySelector("code.language-python .hljs-keyword")).toHaveTextContent("def");
+  });
+
+  it("shows bounded tool progress while a large file call is being prepared", async () => {
+    window.zagent.request = vi.fn(async (path: string, options) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "deepseek", model: "deepseek-chat", base_url: "https://api.deepseek.com", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "2048", updated_at: new Date().toISOString(), event_count: 0 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [] };
+      if (path === "/v1/sessions/s1/context") return { context_version: 0, stats: { count: 0, tokens: 0 }, working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected ${options?.method || "GET"} ${path}`);
+    }) as ZAgentBridge["request"];
+    let finish: ((value: { type: string; result?: unknown }) => void) | undefined;
+    window.zagent.requestStream = vi.fn((_path, _options, onEvent) => new Promise((resolve) => {
+      onEvent?.({ type: "status", round: 1, message: "第 1 轮：正在请求模型" });
+      onEvent?.({ type: "tool_call", name: "fs_write" });
+      onEvent?.({ type: "tool_result", name: "fs_write", ok: true, detail: "index.html" });
+      onEvent?.({ type: "content", text: "已完成 2048" });
+      finish = resolve;
+    })) as ZAgentBridge["requestStream"];
+
+    const { container } = render(<App />);
+    await waitFor(() => expect(screen.getAllByText("2048").length).toBeGreaterThan(0));
+    const input = screen.getByRole("textbox", { name: "任务输入" });
+    fireEvent.change(input, { target: { value: "生成 2048 小游戏" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect((await screen.findAllByText("正在准备工具：fs_write")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("fs_write已完成，正在继续 · index.html")).length).toBeGreaterThan(0);
+    const progress = container.querySelector(".thinking.task-running");
+    const streamingReply = container.querySelector(".streaming-bubble");
+    expect(progress).not.toBeNull();
+    expect(streamingReply).not.toBeNull();
+    expect(progress!.compareDocumentPosition(streamingReply!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    finish?.({ type: "done", result: { stats: {
+      total_tokens: 8, completion_tokens: 4, cache_hit_tokens: 0, cache_miss_tokens: 8,
+      cache_hit_rate: 0, elapsed_seconds: 1, tokens_per_second: 4,
+    } } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送消息" })).toBeInTheDocument());
+  });
+
+  it("opens an immediate approval dialog and resumes the running test", async () => {
+    let streamCallback: ((event: StreamEvent) => void) | undefined;
+    let finishStream: ((value: { type: string; result?: unknown }) => void) | undefined;
+    const permission = {
+      request_id: "prm_runner_1", session_id: "s1", subject_type: "runner",
+      subject_id: "python_unittest", action: "execute",
+      details: { command_template: ["python", "-m", "unittest", "discover"], network: false },
+      status: "pending", created_at: new Date().toISOString(),
+    };
+    window.zagent.request = vi.fn(async (path: string, options) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "Python 项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "deepseek", model: "deepseek-chat", base_url: "https://api.deepseek.com", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "Python 2048", updated_at: new Date().toISOString(), event_count: 0 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [] };
+      if (path === "/v1/sessions/s1/context") return { context_version: 0, stats: { count: 0, tokens: 0 }, working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      if (path === "/v1/permissions/requests/prm_runner_1/decision") {
+        expect(options?.method).toBe("POST");
+        expect(options?.body).toEqual({ decision: "approved", scope: "once" });
+        streamCallback?.({ type: "tool_result", name: "runner_execute", ok: true });
+        finishStream?.({ type: "done", result: { stats: { total_tokens: 3, completion_tokens: 1, cache_hit_tokens: 0, cache_miss_tokens: 3, cache_hit_rate: 0, elapsed_seconds: 1, tokens_per_second: 1 } } });
+        return { request: { ...permission, status: "approved" } };
+      }
+      throw new Error(`unexpected ${options?.method || "GET"} ${path}`);
+    }) as ZAgentBridge["request"];
+    window.zagent.requestStream = vi.fn((_path, _options, onEvent) => new Promise((resolve) => {
+      streamCallback = onEvent;
+      finishStream = resolve;
+      onEvent?.({ type: "status", message: "第 2 轮：正在请求模型" });
+      onEvent?.({ type: "permission_required", request: permission });
+    })) as ZAgentBridge["requestStream"];
+
+    render(<App />);
+    await screen.findByRole("button", { name: /Python 2048/ });
+    const input = screen.getByRole("textbox", { name: "任务输入" });
+    fireEvent.change(input, { target: { value: "运行 Python 测试" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const dialog = await screen.findByRole("alertdialog", { name: "需要批准" });
+    expect(dialog).toHaveTextContent("运行测试 python_unittest");
+    expect(dialog).toHaveTextContent("python -m unittest discover");
+    expect(dialog).toHaveTextContent("去敏只读快照");
+    fireEvent.click(screen.getByRole("button", { name: "仅此一次" }));
+
+    await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "需要批准" })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "发送消息" })).toBeInTheDocument());
+  });
+
+  it("keeps running progress on its session and hides it after switching", async () => {
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 2 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", recent_event_limit: 96, model: { id: "m", name: "", provider: "deepseek", model: "deepseek-chat", base_url: "https://api.deepseek.com", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [
+        { session_id: "s1", title: "2048 任务", updated_at: new Date().toISOString(), event_count: 0 },
+        { session_id: "s2", title: "其他对话", updated_at: new Date().toISOString(), event_count: 0 },
+      ] };
+      if (/\/v1\/sessions\/s[12]\/events/.test(path)) return { events: [] };
+      if (/\/v1\/sessions\/s[12]\/context/.test(path)) return { context_version: 0, stats: { count: 0, tokens: 0 }, working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, memory_stats: { active: 0, candidates: 0 }, pinned_tokens: 0 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+    let finish: ((value: { type: string; result?: unknown }) => void) | undefined;
+    window.zagent.requestStream = vi.fn((_path, _options, onEvent) => new Promise((resolve) => {
+      onEvent?.({ type: "status", round: 1, message: "第 1 轮：正在请求模型" });
+      onEvent?.({ type: "tool_call", name: "fs_write" });
+      finish = resolve;
+    })) as ZAgentBridge["requestStream"];
+
+    render(<App />);
+    await screen.findByRole("button", { name: /2048 任务/ });
+    const input = screen.getByRole("textbox", { name: "任务输入" });
+    fireEvent.change(input, { target: { value: "创建 2048" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(await screen.findByLabelText("正在执行")).toBeInTheDocument();
+    expect((await screen.findAllByText("正在准备工具：fs_write")).length).toBeGreaterThan(0);
+
+    fireEvent.click(screen.getByRole("button", { name: /其他对话/ }));
+    await waitFor(() => expect(document.querySelector(".thinking.task-running")).toBeNull());
+    expect(screen.queryByText("第 1 轮：正在请求模型", { selector: ".thinking span" })).not.toBeInTheDocument();
+    expect(screen.getByRole("textbox", { name: "任务输入" })).toBeDisabled();
+    expect(screen.getByPlaceholderText("另一对话正在执行任务；可点击左侧加载项返回查看")).toBeInTheDocument();
+    expect(screen.getByLabelText("正在执行").closest("button")).toHaveTextContent("2048 任务");
+
+    fireEvent.click(screen.getByRole("button", { name: /2048 任务/ }));
+    expect((await screen.findAllByText("正在准备工具：fs_write")).length).toBeGreaterThan(0);
+    finish?.({ type: "done", result: { stats: { total_tokens: 1, completion_tokens: 1, cache_hit_tokens: 0, cache_miss_tokens: 1, cache_hit_rate: 0, elapsed_seconds: 1, tokens_per_second: 1 } } });
+    await waitFor(() => expect(screen.queryByLabelText("正在执行")).not.toBeInTheDocument());
+  });
+
+  it("explains pinned evidence separately from the recent working-set preview", async () => {
+    const pinnedId = "evt_pinned_older_than_preview";
+    window.zagent.request = vi.fn(async (path: string) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", recent_event_limit: 96, model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 64000, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "上下文测试", updated_at: new Date().toISOString(), event_count: 1 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [{ event_id: pinnedId, sequence: 1, timestamp: new Date().toISOString(), kind: "message", role: "user", token_estimate: 5, payload: "必须一直保留的架构决策" }] };
+      if (path === "/v1/sessions/s1/context") return { stats: { count: 20, tokens: 200 }, working_set: { tokens: 200, budget: 52480, included_event_ids: [pinnedId, ...Array.from({ length: 12 }, (_, index) => `recent_${index}`)], pinned_event_ids: [pinnedId], dropped_pinned_ids: [], pinned_tokens: 5 }, memory_stats: { active: 0, candidates: 1 }, pinned_tokens: 5 };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+
+    render(<App />);
+    expect(await screen.findByRole("button", { name: "长期记忆 · 1 待确认" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "切换上下文检查器" }));
+    expect(screen.getByText("固定证据（持续保留）")).toBeInTheDocument();
+    expect(screen.getAllByText("必须一直保留的架构决策").length).toBeGreaterThan(1);
+    expect(screen.getByText(/模型本轮实际收到 13 个事件/)).toBeInTheDocument();
+    expect(screen.getByText(/预算是安全上限，不是填充目标/)).toBeInTheDocument();
   });
 
   it("clears stale conversation content immediately while switching sessions", async () => {
@@ -114,7 +267,7 @@ describe("Z-Agent desktop UI", () => {
     }) as ZAgentBridge["request"];
 
     render(<App />);
-    await waitFor(() => expect(screen.getByText("暂无事件")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("暂无普通事件")).toBeInTheDocument());
     fireEvent.click(screen.getByRole("button", { name: "模型设置" }));
     expect(screen.getByRole("dialog", { name: "模型设置" })).toBeInTheDocument();
     fireEvent.keyDown(window, { key: "Escape" });
@@ -314,6 +467,108 @@ describe("Z-Agent desktop UI", () => {
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("工作区不可用"));
     expect(input).toHaveValue("请检查代码");
     expect(screen.getByRole("button", { name: "发送消息" })).toBeEnabled();
+  });
+
+  it("reviews, searches, confirms conflicting, and deletes long-term memories", async () => {
+    let confirmed = false;
+    let deleted = false;
+    let pinned = false;
+    let correctedContent = "项目改用 SQLite";
+    let resolvePin: ((value: { memory: Record<string, unknown> }) => void) | undefined;
+    const active = {
+      memory_id: "mem_active_12345678", scope_type: "workspace", scope_id: "ws", memory_type: "semantic",
+      memory_key: "项目数据库", content: "项目使用 PostgreSQL", confidence: .9, status: "active", pinned: false,
+      created_reason: "用户确认", source_session_id: "s1", source_event_ids: ["evt1"],
+      created_at: new Date().toISOString(), updated_at: new Date().toISOString(), last_verified_at: new Date().toISOString(),
+    };
+    const candidate = {
+      ...active, memory_id: "mem_candidate_87654321", content: "项目改用 SQLite", confidence: .82,
+      status: "candidate", conflict_memory_id: active.memory_id, source_event_ids: ["evt2"],
+    };
+    window.zagent.request = vi.fn(async (path: string, options) => {
+      if (path === "/v1/workspaces") return { workspaces: [{ workspace_id: "ws", name: "项目", path: "/tmp/project", session_count: 1 }] };
+      if (path === "/v1/config") return { locale: "zh-CN", model: { id: "m", name: "", provider: "echo", model: "local", base_url: "", context_window: 32768, hard_limit_ratio: .82, soft_limit_ratio: .7 }, models: [], active_model_id: "m" };
+      if (path.startsWith("/v1/sessions?")) return { sessions: [{ session_id: "s1", title: "记忆任务", updated_at: new Date().toISOString(), event_count: 0 }] };
+      if (path === "/v1/sessions/s1/events") return { events: [] };
+      if (path === "/v1/sessions/s1/context") return { stats: { count: 0, tokens: 0 }, working_set: { tokens: 0, budget: 1000, included_event_ids: [], pinned_event_ids: [], dropped_pinned_ids: [], pinned_tokens: 0 }, pinned_tokens: 0 };
+      if (path === "/v1/sessions/s1/memories?include_candidates=true&limit=100") {
+        return { memories: deleted ? [] : confirmed ? [{ ...candidate, content: correctedContent, status: "active", pinned, conflict_memory_id: null }] : [candidate, active] };
+      }
+      if (path === "/v1/sessions/s1/memories/export") return {
+        schema_version: 1, exported_at: new Date().toISOString(), session_id: "s1", workspace_id: "ws", memories: [],
+      };
+      if (path === "/v1/sessions/s1/memories/mem_candidate_87654321/confirm" && options?.method === "POST") {
+        expect(options.body).toEqual({ supersedes_memory_id: "mem_active_12345678" });
+        confirmed = true;
+        return { memory: { ...candidate, status: "active" } };
+      }
+      if (path === "/v1/sessions/s1/memories/mem_candidate_87654321/audit?limit=50") return { audit: [{
+        audit_id: "maud_1", memory_id: candidate.memory_id, action: "created", content_sha256: "a".repeat(64),
+        details: { status: "candidate" }, created_at: new Date().toISOString(),
+      }] };
+      if (path === "/v1/sessions/s1/memories/mem_candidate_87654321" && options?.method === "DELETE") {
+        expect(options.body).toEqual({ reason: "用户在长期记忆管理界面中删除" });
+        deleted = true;
+        return { tombstone: true };
+      }
+      if (path === "/v1/sessions/s1/memories/mem_candidate_87654321" && options?.method === "PATCH") {
+        expect(options.body).toEqual({ pinned: true, expected_pinned: false });
+        return await new Promise<{ memory: Record<string, unknown> }>((resolve) => { resolvePin = resolve; });
+      }
+      if (path === "/v1/sessions/s1/memories/mem_candidate_87654321/correct" && options?.method === "POST") {
+        expect(options.body).toEqual({ content: "项目改用 SQLite 并启用 WAL", reason: "用户在长期记忆管理界面中纠正" });
+        correctedContent = "项目改用 SQLite 并启用 WAL";
+        return { memory: { ...candidate, content: correctedContent, status: "active" }, superseded_memory_id: candidate.memory_id, evidence_event_id: "evt_fix" };
+      }
+      if (path === "/v1/sessions/s1/memories?query=SQLite&limit=20") return { results: [{
+        memory: { ...candidate, status: "active", conflict_memory_id: null }, channels: ["lexical", "sparse"],
+        exact_match: true, fusion_score: .03, sparse_query_coverage: 1, matched_terms: ["sqlite"],
+      }] };
+      throw new Error(`unexpected path: ${path}`);
+    }) as ZAgentBridge["request"];
+    window.zagent.saveJson = vi.fn(async () => "/tmp/zagent-memories.json");
+
+    render(<App />);
+    const memoryButton = await screen.findByRole("button", { name: "长期记忆" });
+    await waitFor(() => expect(memoryButton).toBeEnabled());
+    fireEvent.click(memoryButton);
+    expect(await screen.findByText("待确认", { selector: ".memory-badges span" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "导出 JSON" }));
+    expect(await screen.findByRole("status")).toHaveTextContent("/tmp/zagent-memories.json");
+    expect(window.zagent.saveJson).toHaveBeenCalledWith(
+      expect.stringMatching(/^zagent-memories-\d{4}-\d{2}-\d{2}\.json$/),
+      expect.stringContaining('"schema_version": 1'),
+    );
+    expect(screen.getByText(/确认后将替换同名旧记忆/)).toBeInTheDocument();
+    fireEvent.click(screen.getAllByRole("button", { name: "查看审计" })[0]);
+    expect(await screen.findByLabelText("项目数据库 审计记录")).toHaveTextContent("created");
+    fireEvent.click(screen.getByRole("button", { name: "确认并替换" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "确认并替换" })).not.toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "固定" }));
+    await waitFor(() => expect(resolvePin).toBeDefined());
+    expect(screen.getByRole("textbox", { name: "搜索长期记忆" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "删除" })[0]).toBeDisabled();
+    pinned = true;
+    resolvePin?.({ memory: { ...candidate, status: "active", pinned: true } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "取消固定" })).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "纠正" }));
+    const correction = screen.getByRole("textbox", { name: "纠正后的记忆正文" });
+    fireEvent.change(correction, { target: { value: "项目改用 SQLite 并启用 WAL" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并替换" }));
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "纠正长期记忆" })).not.toBeInTheDocument());
+    expect(screen.getByText("项目改用 SQLite 并启用 WAL", { selector: ".memory-content" })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索长期记忆" }), { target: { value: "SQLite" } });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    expect(await screen.findByText(/召回：精确命中.*匹配 sqlite.*覆盖 100%/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    expect(screen.getByRole("dialog", { name: "确认操作" })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "确认操作" })).not.toBeInTheDocument();
+    expect(screen.getByRole("dialog", { name: "长期记忆" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.getByText("尚未形成长期记忆")).toBeInTheDocument());
   });
 
   it("imports an extension package and tests a real MCP connection from the desktop modal", async () => {

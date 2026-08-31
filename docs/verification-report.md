@@ -472,3 +472,20 @@ Electron 原生 `dialog.showOpenDialog`（`dialog:select-folder` IPC → preload
 - 安全回归验证 API key/私钥模式、internal、assistant reasoning、archive 与 checkpoint 均不会进入记忆；forget 后正文为空，FTS 与持久 sparse 两路均无结果，SHA tombstone 保留。
 - 持久化回归关闭并重新打开独立 `SqliteStore`，跨 Core 重启仍能从新 session 用区域词查询召回原 memory ID 和 source event ID。
 - 本版不声称已经引入稠密 embedding；当前默认路径完全本地、无需训练、不向第三方发送记忆正文。稠密模型仍需通过中文固定评测证明增益后再启用。
+
+## 23. 长期记忆权限、并发和 GUI 复验（2026-08-30）
+
+- Agent 侧 confirm/forget 必须携带显式用户授权 event ID；direct authenticated GUI/API 操作走用户动作边界。中文意图表覆盖普通未来时态反例、明确默认偏好和英文 remember。
+- 两个独立 `SqliteStore` 通过 barrier 同时写相同 candidate，最终只有一个 memory ID、两个来源 event ID，结果分别为 `candidate` 与 `already_candidate`。
+- 过期 active 记忆被转为 `expired` 并追加 audit，之后同 key 新事实可直接生效，不再被不可见旧行占住唯一键。
+- HTTP 审计 API、GUI 冲突替换/搜索解释/审计展开/删除确认均有自动交互测试；浏览器 fixture 进一步完成真实点击。
+- 全量结果：Python 190/190，核心覆盖率超过 80%；Vitest 19/19；Electron 导出边界 4/4；Ruff、TypeScript strict、Vite build、`git diff --check` 通过。1380×900 与 980×680 两种 Electron 窗口边界无横向溢出，浏览器控制台 0 error/warning。
+- 独立 uvicorn Core 使用临时数据目录走真实 loopback HTTP：首次写入 active memory，关闭并重启后从新 session 以“部署在哪个云上，用什么资料库”召回；memory term v2 自动重建后 sparse rank=1、coverage=15.6%，最终 system WorkingSet 包含原 memory ID、正文和 source event ID。
+
+## 24. v0.2.4 Electron 与 Runner 发布验收（2026-08-31）
+
+- 使用隔离的 Electron `user-data-dir`、临时 Core 数据目录与临时工作区，通过 Chromium CDP 驱动真实 renderer、preload、IPC 和 Core；没有用普通浏览器 fixture 冒充桌面链路。
+- 11 组桌面交互全部通过：初始在线/禁用态、上下文检查器三种关闭路径、工作区创建/取消/编辑/切换、对话发送、消息固定/取消、模型增删改切、扩展启停/删除、MCP 授权/撤销/删除、Permission 刷新，以及长期记忆搜索/审计/确认/固定/纠正/删除。验收结束时无残留对话框、无水平溢出、控制台无应用错误。
+- macOS 26 Seatbelt 真实链路在非嵌套宿主中完成去敏快照、`sandbox-exec`、Conda Python 和 `unittest discover`，返回 `OK`；Runner 不再在 dyld 启动阶段以零输出 `SIGABRT` 退出。
+- 发布前全量门禁：Python `197 passed, 1 skipped`；Web UI `23/23`；Electron main/IPC `7/7`；Ruff、TypeScript strict、Node 语法、`git diff --check` 和 Vite production build 全部通过。
+- 生产 UI 构建产物为 JS 416.39 kB（gzip 130.67 kB）、CSS 31.59 kB（gzip 6.44 kB）。Release 工作流会重新构建可重定位 Core 与未签名 arm64 DMG，并校验包内 Python、DMG、源码归档、SBOM 和 SHA256SUMS。

@@ -49,6 +49,7 @@ class ContextOrchestrator:
         if tool_name == "context_status":
             working_set = self._working_sets.build(session_id)
             working_set_data = working_set.to_dict()
+            memories = self._memory.list(session_id, include_candidates=True, limit=100)
             # Public context-tool/API contract uses `tokens`; the internal domain
             # model calls the same value `token_estimate`.  Keep the transport name
             # stable for the Electron inspector and model-facing context tool.
@@ -74,6 +75,10 @@ class ContextOrchestrator:
                 "archive_stats": self._store.archive_stats(session_id),
                 "warning": warning,
                 "pinned_tokens": working_set.pinned_tokens,
+                "memory_stats": {
+                    "active": sum(item["status"] == "active" for item in memories),
+                    "candidates": sum(item["status"] == "candidate" for item in memories),
+                },
             }
         if tool_name == "context_search":
             return {"results": self._retriever.search(session_id, values["query"], values["limit"])}

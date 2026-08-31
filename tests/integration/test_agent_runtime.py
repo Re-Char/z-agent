@@ -2,6 +2,7 @@ from zagent.agent.runtime import AgentRuntime, AgentRuntimeLimits
 from zagent.agent.tools import ContextToolExecutor
 from zagent.domain.errors import AgentLimitError
 from zagent.domain.models import ModelResponse, ToolCall
+from zagent.security import PermissionBroker
 
 
 class SequenceProvider:
@@ -25,6 +26,14 @@ class CountingToolExecutor:
         return {"ok": True, "path": arguments.get("path", ""), "sha256": "b" * 64}
 
 
+class StreamingSequenceProvider:
+    def __init__(self, rounds):
+        self.rounds = iter(rounds)
+
+    def complete_stream(self, _messages, _tools):
+        yield from next(self.rounds)
+
+
 def test_agent_executes_context_tool_then_finishes(store, session_id, context):
     provider = SequenceProvider([
         ModelResponse(content="", tool_calls=[ToolCall("call_1", "context_status", {})], raw={"id": "raw-1"}),
@@ -37,6 +46,192 @@ def test_agent_executes_context_tool_then_finishes(store, session_id, context):
     events = store.list_events(session_id)
     assert any(event.kind == "tool_result" and event.tool_name == "context_status" for event in events)
     assert provider.messages[1][-1]["role"] == "tool"
+
+
+def test_stream_reports_bounded_tool_progress_without_arguments(store, session_id, context):
+    tools = CountingToolExecutor()
+    provider = StreamingSequenceProvider([
+        [
+            {
+                "type": "tool_call", "index": 0, "call_id": "write_1",
+                "name": "fs_write", "arguments_delta": "{very large source}",
+            },
+            {
+                "type": "tool_call", "index": 0, "call_id": "write_1",
+                "name": "fs_write", "arguments_delta": "more source",
+            },
+            {
+                "type": "done",
+                "response": ModelResponse(
+                    content="",
+                    tool_calls=[ToolCall("write_1", "fs_write", {"path": "index.html"})],
+                ),
+            },
+        ],
+        [
+            {"type": "content", "text": "已完成"},
+            {"type": "done", "response": ModelResponse(content="已完成")},
+        ],
+    ])
+    runtime = AgentRuntime(store, context, provider, tools)
+
+    events = list(runtime.send_stream(session_id, "生成 2048"))
+
+    assert [item["type"] for item in events] == [
+        "status", "status", "tool_call", "tool_result", "status", "content", "done"
+    ]
+    assert events[1]["message"] == "模型正在生成工具调用参数"
+    progress = events[2]
+    assert progress == {"type": "tool_call", "name": "fs_write", "call_id": "write_1"}
+    assert "arguments_delta" not in progress
+    assert tools.calls == [("fs_write", {"path": "index.html"})]
+
+
+def test_stream_reports_tool_when_provider_only_names_it_at_completion(store, session_id, context):
+    tools = CountingToolExecutor()
+    provider = StreamingSequenceProvider([
+        [{"type": "done", "response": ModelResponse(
+            content="", tool_calls=[ToolCall("late_1", "fs_write", {"path": "game.py"})]
+        )}],
+        [{"type": "done", "response": ModelResponse(content="完成")}],
+    ])
+    runtime = AgentRuntime(store, context, provider, tools)
+
+    events = list(runtime.send_stream(session_id, "生成 Python 2048"))
+
+    assert {"type": "tool_call", "name": "fs_write", "call_id": "late_1"} in events
+    assert {
+        "type": "tool_result", "name": "fs_write", "ok": True, "detail": "game.py"
+    } in events
+
+
+def test_successful_file_task_creates_candidate_memory_but_chat_does_not(
+    store, session_id, context
+):
+    tools = CountingToolExecutor()
+    runtime = AgentRuntime(store, context, SequenceProvider([
+        ModelResponse(
+            content="", tool_calls=[ToolCall("write_1", "fs_write", {"path": "index.html"})]
+        ),
+        ModelResponse(content="2048 页面已完成"),
+    ]), tools)
+
+    runtime.send(session_id, "生成 2048 HTML 小游戏")
+    memories = context.execute(session_id, "memory_list", {"include_candidates": True})[
+        "memories"
+    ]
+    assert len(memories) == 1
+    assert memories[0]["status"] == "candidate"
+    assert memories[0]["memory_type"] == "episodic"
+    assert "index.html" in memories[0]["content"]
+    assert "生成 2048 HTML 小游戏" in memories[0]["content"]
+
+    chat_session = store.create_session("普通对话")["session_id"]
+    AgentRuntime(
+        store, context, SequenceProvider([ModelResponse(content="你好")]), tools
+    ).send(chat_session, "你好")
+    chat_visible = context.execute(
+        chat_session, "memory_list", {"include_candidates": True}
+    )["memories"]
+    # The file-task candidate is correctly visible across sessions in the same
+    # workspace, while ordinary chat created no additional candidate.
+    assert [item["memory_id"] for item in chat_visible] == [memories[0]["memory_id"]]
+
+
+def test_stream_pauses_for_permission_and_resumes_same_tool_call(store, session_id, context):
+    class PermissionedRunner:
+        schemas = []
+
+        def __init__(self):
+            self.broker = PermissionBroker(store)
+            self.calls = 0
+
+        def execute(self, current_session_id, name, arguments):
+            assert name == "runner_execute"
+            self.calls += 1
+            self.broker.require(
+                current_session_id,
+                "runner",
+                arguments["profile"],
+                "execute",
+                {"profile": arguments["profile"], "timeout_seconds": 10, "network": False},
+                {"command_template": ["python", "-m", "unittest"], "network": False},
+            )
+            return {"ok": True, "profile": arguments["profile"], "output": "OK"}
+
+    tools = PermissionedRunner()
+    provider = StreamingSequenceProvider([
+        [{"type": "done", "response": ModelResponse(
+            content="",
+            tool_calls=[ToolCall(
+                "test_1", "runner_execute", {"profile": "python_unittest"}
+            )],
+        )}],
+        [{"type": "done", "response": ModelResponse(content="测试通过")}],
+    ])
+    stream = AgentRuntime(store, context, provider, tools).send_stream(
+        session_id, "运行 Python 测试"
+    )
+
+    before_approval = []
+    while True:
+        event = next(stream)
+        before_approval.append(event)
+        if event["type"] == "permission_required":
+            break
+
+    permission = before_approval[-1]["request"]
+    assert permission["subject_type"] == "runner"
+    assert permission["details"]["command_template"] == ["python", "-m", "unittest"]
+    assert tools.calls == 1  # first call only performed the permission preflight
+
+    store.decide_permission_request(permission["request_id"], "approved", "once")
+    after_approval = list(stream)
+
+    assert tools.calls == 2
+    assert {"type": "tool_result", "name": "runner_execute", "ok": True} in after_approval
+    assert after_approval[-1]["type"] == "done"
+    assert store.get_permission_request(permission["request_id"])["status"] == "consumed"
+
+
+def test_closing_stream_denies_pending_permission_and_finishes_invocation(
+    store, session_id, context
+):
+    class PermissionedTool:
+        schemas = []
+
+        def execute(self, current_session_id, name, arguments):
+            PermissionBroker(store).require(
+                current_session_id, "runner", "python_pytest", "execute", arguments
+            )
+            return {"ok": True}
+
+    call = ToolCall(
+        "cancel_permission", "runner_execute", {"profile": "python_pytest"}
+    )
+    stream = AgentRuntime(
+        store,
+        context,
+        StreamingSequenceProvider([[
+            {"type": "done", "response": ModelResponse(content="", tool_calls=[call])}
+        ]]),
+        PermissionedTool(),
+    ).send_stream(session_id, "运行 pytest")
+
+    permission = None
+    for event in stream:
+        if event["type"] == "permission_required":
+            permission = event["request"]
+            break
+    assert permission is not None
+    stream.close()
+
+    assert store.get_permission_request(permission["request_id"])["status"] == "denied"
+    replay = store.claim_tool_invocation(
+        session_id, call.call_id, call.name, call.arguments
+    )
+    assert replay["action"] == "replay"
+    assert replay["result"]["error"] == "用户在审批期间取消了任务"
 
 
 def test_agent_stops_at_tool_round_limit(store, session_id, context):

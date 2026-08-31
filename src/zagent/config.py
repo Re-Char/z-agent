@@ -59,7 +59,7 @@ class AppSettings(BaseModel):
     data_dir: str
     locale: Literal["zh-CN", "en-US"] = "zh-CN"
     blob_threshold: int = Field(default=32_768, ge=1_024)
-    recent_event_limit: int = Field(default=24, ge=4, le=200)
+    recent_event_limit: int = Field(default=96, ge=4, le=200)
     max_tool_rounds: int = Field(default=8, ge=1, le=50)
     task_timeout_seconds: float = Field(default=300, ge=5, le=3600)
     # Backward-compatible mirror of the active profile; new configs read `models`.
@@ -132,6 +132,11 @@ class AppSettings(BaseModel):
             return cls(data_dir=root)
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         payload["data_dir"] = root
+        # 24 was the old hidden default and left large-context models with an
+        # unexpectedly tiny recent window. Preserve explicit custom values,
+        # but migrate that legacy default to the new balanced window.
+        if payload.get("recent_event_limit") == 24:
+            payload["recent_event_limit"] = 96
         return cls.model_validate(payload)
 
     def save(self) -> None:

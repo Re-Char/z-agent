@@ -21,6 +21,15 @@ def test_settings_round_trip(tmp_path):
     assert loaded.model.provider == "echo"
 
 
+def test_legacy_recent_event_default_migrates_without_overwriting_custom_value(tmp_path):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"recent_event_limit": 24}), encoding="utf-8")
+    assert AppSettings.load(str(tmp_path)).recent_event_limit == 96
+
+    config_path.write_text(json.dumps({"recent_event_limit": 42}), encoding="utf-8")
+    assert AppSettings.load(str(tmp_path)).recent_event_limit == 42
+
+
 def test_non_echo_provider_requires_base_url():
     with pytest.raises(ValidationError):
         ModelSettings(provider="qwen")
@@ -135,4 +144,3 @@ def test_secret_store_round_trip_and_environment_precedence(tmp_path, monkeypatc
     monkeypatch.setenv("MODEL_KEY", "env-value")
     assert secrets.get("MODEL_KEY") == "env-value"
     assert os.stat(tmp_path / "secrets.json").st_mode & 0o777 == 0o600
-

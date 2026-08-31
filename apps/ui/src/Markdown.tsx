@@ -17,7 +17,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 import "highlight.js/styles/github.css";
-import { marked } from "marked";
+import { marked, Renderer, Tokens } from "marked";
 
 const LANGUAGES = {
   bash, c, cpp, css, go, java, javascript, json, markdown, python, rust, sql, typescript, xml, yaml,
@@ -25,6 +25,33 @@ const LANGUAGES = {
 for (const [name, grammar] of Object.entries(LANGUAGES)) hljs.registerLanguage(name, grammar);
 
 marked.setOptions({ gfm: true, breaks: true });
+
+function normalizedLanguage(value?: string) {
+  return (value || "text").split(/\s+/)[0].toLowerCase().replace(/[^a-z0-9_-]/g, "") || "text";
+}
+
+function highlightedCode(source: string, language: string) {
+  return hljs.getLanguage(language)
+    ? hljs.highlight(source, { language, ignoreIllegals: true }).value
+    : hljs.highlightAuto(source).value;
+}
+
+class MarkdownRenderer extends Renderer {
+  code({ text, lang }: Tokens.Code) {
+    const language = normalizedLanguage(lang);
+    const label = language === "text" ? "代码" : language;
+    const source = text.endsWith("\n") ? text : `${text}\n`;
+    return `<div class="code-block"><div class="code-toolbar"><span>${label}</span>`
+      + `<button type="button" class="code-copy" aria-label="复制 ${label} 代码">复制</button></div>`
+      + `<pre><code class="hljs language-${language}" data-highlighted="yes">${highlightedCode(source, language)}</code></pre></div>\n`;
+  }
+
+  table(token: Tokens.Table) {
+    return `<div class="table-scroll">${super.table(token)}</div>`;
+  }
+}
+
+const markdownRenderer = new MarkdownRenderer();
 
 const EXTENSION_LANGUAGES: Record<string, string> = {
   ".bash": "bash", ".c": "c", ".cc": "cpp", ".cpp": "cpp", ".css": "css",
@@ -59,10 +86,8 @@ export function CodeBlock({ code, language = "text", label }: {
   code: string; language?: string; label?: string;
 }) {
   const [copied, setCopied] = useState(false);
-  const normalizedLanguage = language.toLowerCase().replace(/[^a-z0-9_-]/g, "") || "text";
-  const highlighted = useMemo(() => hljs.getLanguage(normalizedLanguage)
-    ? hljs.highlight(code, { language: normalizedLanguage, ignoreIllegals: true }).value
-    : hljs.highlightAuto(code).value, [code, normalizedLanguage]);
+  const languageName = normalizedLanguage(language);
+  const highlighted = useMemo(() => highlightedCode(code, languageName), [code, languageName]);
 
   async function copy() {
     await copyText(code);
@@ -72,12 +97,12 @@ export function CodeBlock({ code, language = "text", label }: {
 
   return <div className="code-block tool-code-block">
     <div className="code-toolbar">
-      <span>{label || normalizedLanguage}</span>
-      <button type="button" className={`code-copy${copied ? " copied" : ""}`} aria-label={`复制 ${label || normalizedLanguage} 代码`} onClick={copy}>
+      <span>{label || languageName}</span>
+      <button type="button" className={`code-copy${copied ? " copied" : ""}`} aria-label={`复制 ${label || languageName} 代码`} onClick={copy}>
         {copied ? "已复制" : "复制"}
       </button>
     </div>
-    <pre><code className={`hljs language-${normalizedLanguage}`} data-highlighted="yes" dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>
+    <pre><code className={`hljs language-${languageName}`} data-highlighted="yes" dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>
   </div>;
 }
 
@@ -85,72 +110,36 @@ export function CodeBlock({ code, language = "text", label }: {
 export function Markdown({ text, className }: { text: string; className?: string }) {
   const rootRef = useRef<HTMLDivElement>(null);
   const html = useMemo(() => {
-    const rendered = marked.parse(text, { async: false }) as string;
+    const rendered = marked.parse(text, { async: false, renderer: markdownRenderer }) as string;
     return DOMPurify.sanitize(rendered, { ADD_ATTR: ["target"] });
   }, [text]);
 
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
-    const attach = () => {
-      for (const link of root.querySelectorAll<HTMLAnchorElement>("a[href]")) {
-        if (/^https?:\/\//i.test(link.href)) {
-          link.target = "_blank";
-          link.rel = "noreferrer noopener";
-        }
+    for (const link of root.querySelectorAll<HTMLAnchorElement>("a[href]")) {
+      if (/^https?:\/\//i.test(link.href)) {
+        link.target = "_blank";
+        link.rel = "noreferrer noopener";
       }
-      for (const table of root.querySelectorAll("table")) {
-        if (table.parentElement?.classList.contains("table-scroll")) continue;
-        const wrapper = document.createElement("div");
-        wrapper.className = "table-scroll";
-        table.parentNode?.insertBefore(wrapper, table);
-        wrapper.appendChild(table);
-      }
-      for (const pre of root.querySelectorAll("pre")) {
-        const code = pre.querySelector("code");
-        const languageClass = Array.from(code?.classList || []).find((item) => item.startsWith("language-"));
-        const language = languageClass?.slice("language-".length) || "代码";
-        if (code && !code.dataset.highlighted) {
-          const source = code.textContent || "";
-          const highlighted = languageClass && hljs.getLanguage(language)
-            ? hljs.highlight(source, { language, ignoreIllegals: true })
-            : hljs.highlightAuto(source);
-          code.innerHTML = highlighted.value;
-          code.classList.add("hljs");
-          code.dataset.highlighted = "yes";
-        }
-        if (pre.parentElement?.classList.contains("code-block")) continue;
-        const wrapper = document.createElement("div");
-        wrapper.className = "code-block";
-        const toolbar = document.createElement("div");
-        toolbar.className = "code-toolbar";
-        const label = document.createElement("span");
-        label.textContent = language;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "code-copy";
-        button.textContent = "复制";
-        button.setAttribute("aria-label", `复制 ${language} 代码`);
-        button.addEventListener("click", async (event) => {
-          event.stopPropagation();
-          const source = code ? code.textContent || "" : pre.textContent || "";
-          await copyText(source);
-          button.textContent = "已复制";
-          button.classList.add("copied");
-          window.setTimeout(() => {
-            button.textContent = "复制";
-            button.classList.remove("copied");
-          }, 1400);
-        });
-        toolbar.append(label, button);
-        pre.parentNode?.insertBefore(wrapper, pre);
-        wrapper.append(toolbar, pre);
-      }
-    };
-    attach();
-    // markdown -> innerHTML happened before this effect; re-attach after paint
-    const frame = requestAnimationFrame(attach);
-    return () => cancelAnimationFrame(frame);
+    }
+    const cleanups: Array<() => void> = [];
+    for (const button of root.querySelectorAll<HTMLButtonElement>(".code-copy")) {
+      const listener = async (event: MouseEvent) => {
+        event.stopPropagation();
+        const source = button.closest(".code-block")?.querySelector("code")?.textContent || "";
+        await copyText(source);
+        button.textContent = "已复制";
+        button.classList.add("copied");
+        window.setTimeout(() => {
+          button.textContent = "复制";
+          button.classList.remove("copied");
+        }, 1400);
+      };
+      button.addEventListener("click", listener);
+      cleanups.push(() => button.removeEventListener("click", listener));
+    }
+    return () => cleanups.forEach((cleanup) => cleanup());
   }, [html]);
 
   return <div ref={rootRef} className={`markdown${className ? ` ${className}` : ""}`} dangerouslySetInnerHTML={{ __html: html }} />;
